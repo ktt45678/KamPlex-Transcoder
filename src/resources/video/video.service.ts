@@ -215,12 +215,16 @@ export class VideoService {
 
       ffmpeg.stderr.setEncoding('utf8');
       ffmpeg.stderr.on('data', (data) => {
-        reject(data);
+        stdout.write(data);
       });
 
-      ffmpeg.on('close', () => {
+      ffmpeg.on('exit', (code: number) => {
         stdout.write('\n');
-        resolve();
+        if (code !== 0) {
+          reject(`FFmpeg exited with status code: ${code}`);
+        } else {
+          resolve();
+        }
       });
     });
   }
