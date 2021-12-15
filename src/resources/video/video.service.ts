@@ -133,9 +133,10 @@ export class VideoService {
       console.log(`Processing video quality: ${qualityList[i]}`);
       const streamId = await this.SnowFlakeId.createAsync();
       const videoArgs = this.createVideoEncodingArgs(inputFile, parsedInput, qualityList[i], videoParams);
-      const rclonePipeArgs = this.createRclonePipeArgs(parsedInput, qualityList[i], job.data.storage, job.data._id, streamId);
+      const rcloneMoveArgs = this.createRcloneMoveArgs(parsedInput, qualityList[i], job.data.storage, job.data._id, streamId);
       try {
-        await this.pipeEncodeMedia(videoArgs, rclonePipeArgs, videoDuration);
+        await this.encodeMedia(videoArgs, videoDuration);
+        await this.uploadMedia(rcloneMoveArgs);
       } catch (e) {
         const rcloneDir = this.configService.get<string>('RCLONE_DIR');
         const rcloneConfig = this.configService.get<string>('RCLONE_CONFIG_FILE');
@@ -145,7 +146,7 @@ export class VideoService {
         } catch (e) {
           console.error(e);
         }
-        console.error('FFmpeg exited with status code: ' + e);
+        console.error(e);
         throw e;
       }
       await job.progress({
@@ -176,7 +177,7 @@ export class VideoService {
   private createVideoEncodingArgs(inputFile: string, parsedInput: path.ParsedPath, quality: number, videoParams: string[]) {
     const args: string[] = [
       '-hide_banner', '-y',
-      '-progress', 'pipe:2',
+      '-progress', 'pipe:1',
       '-loglevel', 'error',
       '-i', `"${inputFile}"`,
       '-i', `"${parsedInput.dir}/${parsedInput.name}_audio${parsedInput.ext}"`,
@@ -185,9 +186,8 @@ export class VideoService {
       '-map', '1:a:0',
       '-map_metadata', '-1',
       '-vf', `scale=-2:${quality}`,
-      '-f', 'mp4',
-      '-movflags', 'empty_moov+omit_tfhd_offset+frag_keyframe+default_base_moof',
-      '-'
+      '-movflags', '+faststart',
+      '-f', 'mp4', `"${parsedInput.dir}/${parsedInput.name}_${quality}${parsedInput.ext}"`
     ];
     return args;
   }
@@ -197,6 +197,17 @@ export class VideoService {
     const args: string[] = [
       '--config', rcloneConfigFile,
       'rcat', `"${remote}:${parentFolder}/${streamId}/${parsedInput.name}_${quality}${parsedInput.ext}"`
+    ];
+    return args;
+  }
+
+  private createRcloneMoveArgs(parsedInput: path.ParsedPath, quality: number, remote: string, parentFolder: string, streamId: string) {
+    const rcloneConfigFile = this.configService.get<string>('RCLONE_CONFIG_FILE');
+    const args: string[] = [
+      '--config', rcloneConfigFile,
+      'move',
+      `"${parsedInput.dir}/${parsedInput.name}_${quality}${parsedInput.ext}"`,
+      `"${remote}:${parentFolder}/${streamId}`
     ];
     return args;
   }
@@ -222,6 +233,27 @@ export class VideoService {
         stdout.write('\n');
         if (code !== 0) {
           reject(`FFmpeg exited with status code: ${code}`);
+        } else {
+          resolve();
+        }
+      });
+    });
+  }
+
+  private uploadMedia(args: string[]) {
+    return new Promise<void>((resolve, reject) => {
+      console.log('\x1b[36m%s\x1b[0m', 'rclone ' + args.join(' '));
+      const rclone = child_process.spawn(`${this.configService.get<string>('RCLONE_DIR')}/rclone`, args, { shell: true });
+
+      rclone.stderr.setEncoding('utf8');
+      rclone.stderr.on('data', (data) => {
+        stdout.write(data);
+      });
+
+      rclone.on('exit', (code: number) => {
+        stdout.write('\n');
+        if (code !== 0) {
+          reject(`Rclone exited with status code: ${code}`);
         } else {
           resolve();
         }
