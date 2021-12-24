@@ -156,6 +156,7 @@ export class VideoService {
         codec: codec,
         quality: qualityList[i],
         media: job.data.media,
+        episode: job.data.episode,
         storage: job.data.storage
       });
     }
@@ -360,7 +361,9 @@ export class VideoService {
   }
 
   private generateStatusJson(code: string, jobData: IVideoData) {
-    return JSON.stringify(this.generateStatus(code, jobData));
+    const status = this.generateStatus(code, jobData);
+    console.log(status);
+    return JSON.stringify(status);
   }
 
   private generateStatus(code: string, jobData: IVideoData) {

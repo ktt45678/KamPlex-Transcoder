@@ -12,12 +12,8 @@ import { VideoModule } from './resources/video/video.module';
       isGlobal: true,
       cache: true
     }),
-    BullModule.forRootAsync({
-      imports: [ConfigModule],
-      inject: [ConfigService],
-      useFactory: async (configService: ConfigService) => ({
-        redis: configService.get<string>('REDIS_QUEUE_URL'),
-      })
+    BullModule.forRoot({
+      redis: <any>process.env.REDIS_QUEUE_URL
     }),
     VideoModule
   ],

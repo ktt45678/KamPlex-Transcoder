@@ -7,5 +7,6 @@ export class IVideoData {
   mimeType: string;
   storage: string;
   media: string;
+  episode?: string;
   user: User;
 }
