@@ -14,7 +14,7 @@ export class ExternalStorage {
   name: string;
 
   @Prop({ required: true })
-  kind: string;
+  kind: number;
 
   @Prop()
   accessToken: string;

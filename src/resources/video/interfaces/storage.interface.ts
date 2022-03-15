@@ -5,7 +5,7 @@ export class IStorage {
   accessToken: string;
   expiry: Date;
   folderId: string;
-  kind: string;
+  kind: number;
   folderName: string;
   publicUrl: string;
   inStorage: string;

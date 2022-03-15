@@ -10,8 +10,9 @@ import { TaskQueue } from '../../enums/task-queue.enum';
     BullModule.registerQueue({
       name: TaskQueue.VIDEO_TRANSCODE,
       defaultJobOptions: {
-        removeOnComplete: true,
-        removeOnFail: true
+        removeOnComplete: 10,
+        removeOnFail: 10,
+        attempts: 3
       }
     })
   ],

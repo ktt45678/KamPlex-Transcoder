@@ -11,11 +11,21 @@ export function createRcloneConfig(storage: IStorage, clientId: string, clientSe
     expiry: DateTime.fromJSDate(storage.expiry).toISO()
   });
   let newConfig = `[${storage._id}]\n`;
-  newConfig += 'type = drive\n';
+  if (storage.kind === 3) {
+    newConfig += 'type = drive\n';
+  }
+  else {
+    newConfig += 'type = onedrive\n';
+  }
   newConfig += `client_id = ${clientId}\n`;
   newConfig += `client_secret = ${clientSecret}\n`;
   newConfig += `token = ${token}\n`;
-  newConfig += `root_folder_id = ${storage.folderId}\n\n`;
+  if (storage.kind === 3) {
+    newConfig += `root_folder_id = ${storage.folderId}\n\n`;
+  } else {
+    newConfig += `drive_id = ${storage.folderId}\n`;
+    newConfig += 'drive_type = business\n\n';
+  }
   return newConfig;
 }
 

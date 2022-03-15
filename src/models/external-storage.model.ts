@@ -5,7 +5,7 @@ import { SnowFlakeId } from '../utils/snowflake-id.util';
 interface IExternalStorage {
   _id: string;
   name: string;
-  kind: string;
+  kind: number;
   accessToken: string;
   refreshToken: string;
   expiry: Date;
@@ -20,7 +20,7 @@ interface IExternalStorage {
 const externalStorageSchema = new Schema<IExternalStorage>({
   _id: { type: String, default: () => new SnowFlakeId().create() },
   name: { type: String, required: true, unique: true },
-  kind: { type: String, required: true },
+  kind: { type: Number, required: true },
   accessToken: { type: String },
   refreshToken: { type: String, required: true },
   expiry: { type: Date },
