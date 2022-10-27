@@ -1,5 +1,6 @@
 export const PORT = 3001;
 export const ADDRESS = '0.0.0.0';
+export const SNOWFLAKE_EPOCH = 1609459200000;
 export const SNOWFLAKE_MACHINE_ID = 2;
 export const ENCODING_QUALITY = [2160, 1440, 1080, 720, 480, 360];
 export const AUDIO_PARAMS = ['-c:a', 'libfdk_aac', '-vbr', '5'];

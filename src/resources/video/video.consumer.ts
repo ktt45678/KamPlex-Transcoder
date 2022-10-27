@@ -4,14 +4,13 @@ import { Job } from 'bull';
 import { VideoService } from './video.service';
 import { TaskQueue } from '../../enums/task-queue.enum';
 import { IVideoData } from './interfaces/video-data.interface';
-import { IJobData } from './interfaces/job-data.interface';
 import { StreamCodec } from '../../enums/stream-codec.enum';
 
 @Processor(TaskQueue.VIDEO_TRANSCODE)
 export class VideoCosumer {
   constructor(private readonly videoService: VideoService) { }
 
-  @Process({ name: StreamCodec.H264_AAC.toString(), concurrency: 0 })
+  @Process({ name: StreamCodec.H264_AAC.toString(), concurrency: 1 })
   async transcodeH264AAC(job: Job<IVideoData>) {
     const result = await this.videoService.transcode(job, StreamCodec.H264_AAC);
     await job.discard();
@@ -33,13 +32,6 @@ export class VideoCosumer {
     return result;
   }
   */
-
-  @Process('cancel')
-  async cancelRunningJob(job: Job<IJobData>) {
-    const result = this.videoService.addToCanceled(job);
-    await job.discard();
-    return result;
-  }
 
   @OnQueueActive()
   onActive(job: Job) {

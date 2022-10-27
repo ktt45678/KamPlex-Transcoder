@@ -1,13 +1,11 @@
 import { Prop, Schema, SchemaFactory } from '@nestjs/mongoose';
-import { Document, Types } from 'mongoose';
-
-import { SnowFlakeId } from '../utils/snowflake-id.util';
+import { Document } from 'mongoose';
 
 export type ExternalStorageDocument = ExternalStorage & Document;
 
 @Schema()
 export class ExternalStorage {
-  @Prop({ default: () => new SnowFlakeId().create() })
+  @Prop()
   _id: string;
 
   @Prop({ required: true, unique: true })

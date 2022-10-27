@@ -1,4 +1,5 @@
 export interface IJobData {
-  id: number | string;
-  name: string;
+  id?: number | string;
+  ids?: number[] | string[];
+  //name: string;
 }

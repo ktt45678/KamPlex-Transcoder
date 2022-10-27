@@ -1,7 +1,5 @@
 import { Schema, model } from 'mongoose';
 
-import { SnowFlakeId } from '../utils/snowflake-id.util';
-
 interface IExternalStorage {
   _id: string;
   name: string;
@@ -18,7 +16,7 @@ interface IExternalStorage {
 }
 
 const externalStorageSchema = new Schema<IExternalStorage>({
-  _id: { type: String, default: () => new SnowFlakeId().create() },
+  _id: { type: String, required: true },
   name: { type: String, required: true, unique: true },
   kind: { type: Number, required: true },
   accessToken: { type: String },

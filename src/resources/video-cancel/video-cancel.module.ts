@@ -1,14 +1,15 @@
 import { Module } from '@nestjs/common';
 import { BullModule } from '@nestjs/bull';
 
-import { VideoService } from './video.service';
-import { VideoCosumer } from './video.consumer';
+import { VideoModule } from '../video/video.module';
+import { VideoCancelConsumer } from './video-cancel.consumer';
 import { TaskQueue } from '../../enums/task-queue.enum';
 
 @Module({
   imports: [
+    VideoModule,
     BullModule.registerQueue({
-      name: TaskQueue.VIDEO_TRANSCODE,
+      name: TaskQueue.VIDEO_CANCEL,
       defaultJobOptions: {
         removeOnComplete: 10,
         removeOnFail: 10,
@@ -16,7 +17,6 @@ import { TaskQueue } from '../../enums/task-queue.enum';
       }
     })
   ],
-  providers: [VideoCosumer, VideoService],
-  exports: [VideoService]
+  providers: [VideoCancelConsumer]
 })
-export class VideoModule { }
+export class VideoCancelModule { }

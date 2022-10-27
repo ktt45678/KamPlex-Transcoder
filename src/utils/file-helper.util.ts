@@ -35,3 +35,7 @@ export async function deleteFile(filePath: string) {
   if (isFileExists)
     await fs.promises.unlink(filePath);
 }
+
+export async function deleteFolder(folderPath: string) {
+  return fs.promises.rm(folderPath, { recursive: true, force: true, maxRetries: 3 });
+}
