@@ -4,6 +4,8 @@ interface IExternalStorage {
   _id: string;
   name: string;
   kind: number;
+  clientId: string;
+  clientSecret: string;
   accessToken: string;
   refreshToken: string;
   expiry: Date;
@@ -20,6 +22,8 @@ const externalStorageSchema = new Schema<IExternalStorage>({
   name: { type: String, required: true, unique: true },
   kind: { type: Number, required: true },
   accessToken: { type: String },
+  clientId: { type: String, required: true },
+  clientSecret: { type: String, required: true },
   refreshToken: { type: String, required: true },
   expiry: { type: Date },
   folderId: { type: String },

@@ -68,8 +68,7 @@ export class VideoService {
       if (!externalStorage)
         throw new Error(this.generateStatusJson(StatusCode.STORAGE_NOT_FOUND, job.data));
       externalStorage = await this.decryptToken(externalStorage);
-      const newConfig = createRcloneConfig(externalStorage, this.configService.get<string>('ONEDRIVE_CLIENT_ID'),
-        this.configService.get<string>('ONEDRIVE_CLIENT_SECRET'));
+      const newConfig = createRcloneConfig(externalStorage);
       await appendToFile(rcloneConfigFile, newConfig);
     }
 
@@ -457,6 +456,8 @@ export class VideoService {
 
   private async decryptToken(storage: IStorage) {
     const stringCrypto = new StringCrypto(this.configService.get<string>('CRYPTO_SECRET_KEY'));
+    storage.clientId = await stringCrypto.decrypt(storage.clientId);
+    storage.clientSecret = await stringCrypto.decrypt(storage.clientSecret);
     if (storage.accessToken)
       storage.accessToken = await stringCrypto.decrypt(storage.accessToken);
     storage.refreshToken = await stringCrypto.decrypt(storage.refreshToken);

@@ -3,7 +3,7 @@ import child_process from 'child_process';
 
 import { IStorage } from '../resources/video/interfaces/storage.interface';
 
-export function createRcloneConfig(storage: IStorage, clientId: string, clientSecret: string) {
+export function createRcloneConfig(storage: IStorage) {
   const token = JSON.stringify({
     access_token: storage.accessToken,
     token_type: 'Bearer',
@@ -17,8 +17,8 @@ export function createRcloneConfig(storage: IStorage, clientId: string, clientSe
   else {
     newConfig += 'type = onedrive\n';
   }
-  newConfig += `client_id = ${clientId}\n`;
-  newConfig += `client_secret = ${clientSecret}\n`;
+  newConfig += `client_id = ${storage.clientId}\n`;
+  newConfig += `client_secret = ${storage.clientSecret}\n`;
   newConfig += `token = ${token}\n`;
   if (storage.kind === 3) {
     newConfig += `root_folder_id = ${storage.folderId}\n\n`;

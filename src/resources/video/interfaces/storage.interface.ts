@@ -1,6 +1,8 @@
 export class IStorage {
   _id: string;
   name: string;
+  clientId: string;
+  clientSecret: string;
   refreshToken: string;
   accessToken: string;
   expiry: Date;
