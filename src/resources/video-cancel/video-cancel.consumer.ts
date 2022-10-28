@@ -1,5 +1,8 @@
+import { Inject } from '@nestjs/common';
 import { OnQueueActive, Process, Processor } from '@nestjs/bull';
 import { Job } from 'bull';
+import { WINSTON_MODULE_PROVIDER } from 'nest-winston';
+import { Logger } from 'winston';
 
 import { TaskQueue } from '../../enums/task-queue.enum';
 import { IJobData } from '../video/interfaces/job-data.interface';
@@ -7,7 +10,7 @@ import { VideoService } from '../video/video.service';
 
 @Processor(TaskQueue.VIDEO_CANCEL)
 export class VideoCancelConsumer {
-  constructor(private readonly videoService: VideoService) { }
+  constructor(@Inject(WINSTON_MODULE_PROVIDER) private readonly logger: Logger, private readonly videoService: VideoService) { }
 
   @Process({ name: 'cancel', concurrency: 1 })
   async cancelRunningJob(job: Job<IJobData>) {
@@ -18,6 +21,6 @@ export class VideoCancelConsumer {
 
   @OnQueueActive()
   onActive(job: Job) {
-    console.log('\x1b[33m%s\x1b[0m', `Processing job ${job.id} of type ${job.name}`);
+    this.logger.info(`Processing job ${job.id} of type ${job.name}`);
   }
 }

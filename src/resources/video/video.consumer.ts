@@ -1,5 +1,8 @@
+import { Inject } from '@nestjs/common';
 import { Processor, Process, OnQueueActive } from '@nestjs/bull';
 import { Job } from 'bull';
+import { WINSTON_MODULE_PROVIDER } from 'nest-winston';
+import { Logger } from 'winston';
 
 import { VideoService } from './video.service';
 import { TaskQueue } from '../../enums/task-queue.enum';
@@ -8,7 +11,7 @@ import { StreamCodec } from '../../enums/stream-codec.enum';
 
 @Processor(TaskQueue.VIDEO_TRANSCODE)
 export class VideoCosumer {
-  constructor(private readonly videoService: VideoService) { }
+  constructor(@Inject(WINSTON_MODULE_PROVIDER) private readonly logger: Logger, private readonly videoService: VideoService) { }
 
   @Process({ name: StreamCodec.H264_AAC.toString(), concurrency: 1 })
   async transcodeH264AAC(job: Job<IVideoData>) {
@@ -35,6 +38,6 @@ export class VideoCosumer {
 
   @OnQueueActive()
   onActive(job: Job) {
-    console.log('\x1b[33m%s\x1b[0m', `Processing job ${job.id} of type ${job.name}`);
+    this.logger.info(`Processing job ${job.id} of type ${job.name}`);
   }
 }

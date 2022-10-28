@@ -29,14 +29,16 @@ export function createRcloneConfig(storage: IStorage) {
   return newConfig;
 }
 
-export async function downloadFile(configPath: string, rcloneDir: string, remote: string, folder: string, file: string, saveFolder: string) {
+export async function downloadFile(configPath: string, rcloneDir: string, remote: string, folder: string, file: string,
+  saveFolder: string, logFn: (args: string[]) => void) {
   const args: string[] = [
     '--ignore-checksum',
     '--config', `"${configPath}"`,
     'copy', `${remote}:${folder}/${file}`,
     saveFolder
   ];
-  console.log('\x1b[36m%s\x1b[0m', 'rclone ' + args.join(' '));
+  logFn(args);
+  //console.log('\x1b[36m%s\x1b[0m', 'rclone ' + args.join(' '));
   return new Promise<void>((resolve, reject) => {
     const rclone = child_process.spawn(`${rcloneDir}/rclone`, args, { shell: true });
     rclone.stderr.setEncoding('utf8');
@@ -50,12 +52,34 @@ export async function downloadFile(configPath: string, rcloneDir: string, remote
   });
 }
 
-export async function deletePath(configPath: string, rcloneDir: string, remote: string, path: string) {
+export async function deletePath(configPath: string, rcloneDir: string, remote: string, path: string, logFn: (args: string[]) => void) {
   const args: string[] = [
     '--config', `"${configPath}"`,
     'purge', `${remote}:${path}`
   ];
-  console.log('\x1b[36m%s\x1b[0m', 'rclone ' + args.join(' '));
+  logFn(args);
+  //console.log('\x1b[36m%s\x1b[0m', 'rclone ' + args.join(' '));
+  return new Promise<void>((resolve, reject) => {
+    const rclone = child_process.spawn(`${rcloneDir}/rclone`, args, { shell: true });
+    rclone.stderr.setEncoding('utf8');
+    rclone.stderr.on('data', (data) => {
+      reject(data);
+    });
+
+    rclone.on('close', () => {
+      resolve();
+    });
+  });
+}
+
+export async function deleteRemote(configPath: string, rcloneDir: string, remote: string, logFn: (args: string[]) => void) {
+  const args: string[] = [
+    '--config', `"${configPath}"`,
+    'config', 'delete',
+    remote
+  ];
+  logFn(args);
+  //console.log('\x1b[36m%s\x1b[0m', 'rclone ' + args.join(' '));
   return new Promise<void>((resolve, reject) => {
     const rclone = child_process.spawn(`${rcloneDir}/rclone`, args, { shell: true });
     rclone.stderr.setEncoding('utf8');

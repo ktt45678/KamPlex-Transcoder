@@ -1,6 +1,9 @@
 import { Module } from '@nestjs/common';
 import { ConfigModule, ConfigService } from '@nestjs/config';
 import { BullModule } from '@nestjs/bull';
+import { utilities as nestWinstonModuleUtilities, WinstonModule } from 'nest-winston';
+import * as winston from 'winston';
+import 'winston-daily-rotate-file';
 
 import { AppController } from './app.controller';
 import { AppService } from './app.service';
@@ -19,6 +22,30 @@ import { VideoCancelModule } from './resources/video-cancel/video-cancel.module'
         url: configService.get<string>('REDIS_QUEUE_URL')
       }),
       inject: [ConfigService],
+    }),
+    WinstonModule.forRoot({
+      levels: { emerg: 0, alert: 1, crit: 2, error: 3, warning: 4, notice: 5, info: 6, debug: 7 },
+      transports: [
+        new winston.transports.Console({
+          format: winston.format.combine(
+            winston.format.timestamp(),
+            winston.format.ms(),
+            nestWinstonModuleUtilities.format.nestLike('Logger')
+          )
+        }),
+        new winston.transports.DailyRotateFile({
+          format: winston.format.combine(
+            winston.format.timestamp(),
+            winston.format.json()
+          ),
+          filename: 'info_%DATE%.log',
+          dirname: 'logs',
+          datePattern: 'YYYY-MM-DD',
+          maxFiles: 300,
+          auditFile: 'logs/audit.json',
+          level: 'info'
+        })
+      ]
     }),
     VideoModule,
     VideoCancelModule
