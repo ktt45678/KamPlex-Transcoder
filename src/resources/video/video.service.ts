@@ -5,18 +5,19 @@ import mongoose from 'mongoose';
 import { stdout } from 'process';
 import child_process from 'child_process';
 import path from 'path';
-import FFprobe from 'ffprobe';
+import FFprobe from 'ffprobe-client';
 import { WINSTON_MODULE_PROVIDER } from 'nest-winston';
 import { Logger } from 'winston';
 
 import { externalStorageModel } from '../../models/external-storage.model';
 import { IEncodeVideoAudioArgs, IVideoData, IJobData, IStorage } from './interfaces';
-import { Progress } from './entities/progress.entity';
 import { StatusCode } from '../../enums/status-code.enum';
 import { StreamCodec } from '../../enums/stream-codec.enum';
 import { RejectCode } from '../../enums/reject-code.enum';
-import { findInFile, appendToFile, deleteFile, fileExists, deleteFolder } from '../../utils/file-helper.util';
+import { findInFile, appendToFile, fileExists, deleteFolder } from '../../utils/file-helper.util';
 import { createRcloneConfig, downloadFile, deletePath } from '../../utils/rclone.util';
+import { generateSprites } from '../../utils/thumbnail.util';
+import { parseProgress, progressPercent } from '../../utils/ffmpeg-helper.util';
 import { StringCrypto } from '../../utils/string-crypto.util';
 import { createSnowFlakeId } from '../../utils/snowflake-id.util';
 import { ENCODING_QUALITY, AUDIO_PARAMS, AUDIO_2ND_PARAMS, VIDEO_H264_PARAMS, VIDEO_VP9_PARAMS, VIDEO_AV1_PARAMS } from '../../config';
@@ -29,6 +30,7 @@ export class VideoService {
   private VideoVP9Params: string[];
   private VideoAV1Params: string[];
   private CanceledJobIds: (string | number)[];
+  private thumbnailFolder: string;
 
   constructor(@Inject(WINSTON_MODULE_PROVIDER) private readonly logger: Logger, private configService: ConfigService) {
     const audioParams = this.configService.get<string>('AUDIO_PARAMS');
@@ -42,6 +44,7 @@ export class VideoService {
     const videoAV1Params = this.configService.get<string>('VIDEO_AV1_PARAMS');
     this.VideoAV1Params = videoAV1Params ? videoAV1Params.split(' ') : VIDEO_AV1_PARAMS;
     this.CanceledJobIds = [];
+    this.thumbnailFolder = 'thumbnails';
   }
 
   async transcode(job: Job<IVideoData>, codec: number = 1) {
@@ -91,7 +94,7 @@ export class VideoService {
         }));
     } catch (e) {
       this.logger.error(e);
-      await deleteFile(inputFile);
+      await deleteFolder(transcodeDir);
       throw new Error(this.generateStatusJson(StatusCode.DOWNLOAD_FAILED, job.data));
     }
     let videoInfo: FFprobe.FFProbeResult;
@@ -100,29 +103,47 @@ export class VideoService {
       videoInfo = await FFprobe(inputFile, { path: `${ffmpegDir}/ffprobe` });
     } catch (e) {
       this.logger.error(e);
-      await deleteFile(inputFile);
+      await deleteFolder(transcodeDir);
+      await job.discard();
       throw new Error(this.generateStatusJson(StatusCode.PROBE_FAILED, job.data));
     }
 
     const videoTrack = videoInfo.streams.find(s => s.codec_type === 'video');
     if (!videoTrack) {
       this.logger.error('Video track not found');
-      await deleteFile(inputFile);
+      await deleteFolder(transcodeDir);
+      await job.discard();
       throw new Error(this.generateStatusJson(StatusCode.NO_VIDEO_TRACK, job.data));
     }
 
     const audioTracks = videoInfo.streams.filter(s => s.codec_type === 'audio');
-    if (!audioTracks) {
+    if (!audioTracks.length) {
       this.logger.error('Audio track not found');
-      await deleteFile(inputFile);
+      await deleteFolder(transcodeDir);
+      await job.discard();
       throw new Error(this.generateStatusJson(StatusCode.NO_AUDIO_TRACK, job.data));
     }
 
-    const videoDuration = videoTrack.duration ? Math.trunc(videoTrack.duration * 1000000) : 0;
-    const availableQualityList = this.calculateQuality(videoTrack.height, qualityList);
+    const runtime = videoInfo.format.duration ? Math.trunc(+videoInfo.format.duration) : 0;
+    const videoDuration = videoTrack.duration ? Math.trunc(+videoTrack.duration) : 0;
+
+    const allQualityList = this.calculateQuality(videoTrack.height, qualityList);
+    this.logger.info(`All quality: ${allQualityList.length ? allQualityList.join(', ') : 'None'}`);
+    if (!allQualityList.length) {
+      await deleteFolder(transcodeDir);
+      await job.discard();
+      throw new Error(this.generateStatusJson(StatusCode.LOW_QUALITY_VIDEO, job.data));
+    }
+
+    // Check already encoded files
+    this.logger.info('Checking already encoded files');
+    let alreadyEncodedFiles = await this.findUploadedFiles(job.data.storage, job.data._id);
+    const availableQualityList = allQualityList.filter(quality =>
+      !alreadyEncodedFiles.find(file => file.Name === `${parsedInput.name}_${quality}.mp4`));
     this.logger.info(`Avaiable quality: ${availableQualityList.length ? availableQualityList.join(', ') : 'None'}`);
     if (!availableQualityList.length) {
-      await deleteFile(inputFile);
+      await deleteFolder(transcodeDir);
+      await job.discard();
       throw new Error(this.generateStatusJson(StatusCode.LOW_QUALITY_VIDEO, job.data));
     }
 
@@ -141,7 +162,7 @@ export class VideoService {
     try {
       await this.encodeMedia(audioArgs, videoDuration, job.id);
     } catch (e) {
-      this.logger.error(e);
+      this.logger.error(JSON.stringify(e));
       await deleteFolder(transcodeDir);
       // await Promise.all([
       //   deleteFile(inputFile),
@@ -163,7 +184,7 @@ export class VideoService {
       try {
         await this.encodeMedia(audio2ndArgs, videoDuration, job.id);
       } catch (e) {
-        this.logger.error(e);
+        this.logger.error(JSON.stringify(e));
         await deleteFolder(transcodeDir);
         if (e === RejectCode.JOB_CANCEL) {
           this.logger.info(`Received cancel signal from job id: ${job.id}`);
@@ -180,16 +201,32 @@ export class VideoService {
     try {
       if (codec === StreamCodec.H264_AAC) {
         this.logger.info('Video codec: H264');
-        await this.encodeByCodec(inputFile, parsedInput, encodeVideoAudioArgs, videoDuration, availableQualityList, StreamCodec.H264_AAC, videoH264Params, job);
+        await this.encodeByCodec(inputFile, parsedInput, encodeVideoAudioArgs, videoDuration, runtime, availableQualityList,
+          StreamCodec.H264_AAC, videoH264Params, job);
       }
       else if (codec === StreamCodec.VP9_AAC) {
         this.logger.info('Video codec: VP9');
-        await this.encodeByCodec(inputFile, parsedInput, encodeVideoAudioArgs, videoDuration, availableQualityList, StreamCodec.VP9_AAC, videoVP9Params, job);
+        await this.encodeByCodec(inputFile, parsedInput, encodeVideoAudioArgs, videoDuration, runtime, availableQualityList,
+          StreamCodec.VP9_AAC, videoVP9Params, job);
       }
       else if (codec === StreamCodec.AV1_AAC) {
         this.logger.info('Video codec: AV1');
-        await this.encodeByCodec(inputFile, parsedInput, encodeVideoAudioArgs, videoDuration, availableQualityList, StreamCodec.AV1_AAC, videoAV1Params, job);
+        await this.encodeByCodec(inputFile, parsedInput, encodeVideoAudioArgs, videoDuration, runtime, availableQualityList,
+          StreamCodec.AV1_AAC, videoAV1Params, job);
       }
+      // Generate preview thumbnail
+      this.logger.info(`Generating preview thumbnail: ${inputFile}`);
+      await generateSprites({
+        source: inputFile,
+        output: `${parsedInput.dir}/${this.thumbnailFolder}`,
+        duration: videoDuration,
+        ffmpegDir,
+        jobId: job.id,
+        canceledJobIds: this.CanceledJobIds
+      });
+      const rcloneMoveThumbArgs = this.createRcloneMoveThumbArgs(parsedInput, job.data.storage, job.data._id);
+      await this.uploadMedia(rcloneMoveThumbArgs);
+
       // Check uploaded files
       this.logger.info('Checking uploaded files');
       let uploadedFiles = await this.findUploadedFiles(job.data.storage, job.data._id);
@@ -202,7 +239,7 @@ export class VideoService {
       }
       this.logger.info(`${uploadedFiles.length}/${totalExpectedFiles} files uploaded`);
     } catch (e) {
-      this.logger.error(e);
+      this.logger.error(JSON.stringify(e));
       if (e === RejectCode.JOB_CANCEL) {
         this.logger.info(`Received cancel signal from job id: ${job.id}`);
         return this.generateStatus(StatusCode.CANCELLED_ENCODING, job.data);
@@ -230,7 +267,8 @@ export class VideoService {
     return job.data;
   }
 
-  private async encodeByCodec(inputFile: string, parsedInput: path.ParsedPath, audioArgs: IEncodeVideoAudioArgs, videoDuration: number, qualityList: number[], codec: number, videoParams: string[], job: Job<IVideoData>) {
+  private async encodeByCodec(inputFile: string, parsedInput: path.ParsedPath, audioArgs: IEncodeVideoAudioArgs, videoDuration: number,
+    runtime: number, qualityList: number[], codec: number, videoParams: string[], job: Job<IVideoData>) {
     for (let i = 0; i < qualityList.length; i++) {
       this.logger.info(`Processing video quality: ${qualityList[i]}`);
       const streamId = await createSnowFlakeId();
@@ -267,6 +305,7 @@ export class VideoService {
         streamId: streamId,
         fileName: `${parsedInput.name}_${qualityList[i]}.mp4`,
         codec: codec,
+        runtime: runtime,
         quality: qualityList[i],
         media: job.data.media,
         episode: job.data.episode,
@@ -347,6 +386,7 @@ export class VideoService {
     const rcloneConfigFile = this.configService.get<string>('RCLONE_CONFIG_FILE');
     const args: string[] = [
       '--config', rcloneConfigFile,
+      '--low-level-retries', '5',
       'rcat', `"${remote}:${parentFolder}/${streamId}/${parsedInput.name}_${quality}.mp4"`
     ];
     return args;
@@ -356,9 +396,22 @@ export class VideoService {
     const rcloneConfigFile = this.configService.get<string>('RCLONE_CONFIG_FILE');
     const args: string[] = [
       '--config', rcloneConfigFile,
+      '--low-level-retries', '5',
       'move',
       `"${parsedInput.dir}/${parsedInput.name}_${quality}.mp4"`,
       `"${remote}:${parentFolder}/${streamId}"`
+    ];
+    return args;
+  }
+
+  private createRcloneMoveThumbArgs(parsedInput: path.ParsedPath, remote: string, parentFolder: string) {
+    const rcloneConfigFile = this.configService.get<string>('RCLONE_CONFIG_FILE');
+    const args: string[] = [
+      '--config', rcloneConfigFile,
+      '--low-level-retries', '5',
+      'move',
+      `"${parsedInput.dir}/${this.thumbnailFolder}"`,
+      `"${remote}:${parentFolder}/${this.thumbnailFolder}"`
     ];
     return args;
   }
@@ -372,8 +425,8 @@ export class VideoService {
 
       ffmpeg.stdout.setEncoding('utf8');
       ffmpeg.stdout.on('data', async (data: string) => {
-        const progress = this.parseProgress(data);
-        const percent = this.progressPercent(progress.outTimeMs, videoDuration);
+        const progress = parseProgress(data);
+        const percent = progressPercent(progress.outTimeMs, videoDuration * 1000000);
         stdout.write(`Encoding: ${percent}% - frame: ${progress.frame || 'N/A'} - fps: ${progress.fps || 'N/A'} - bitrate: ${progress.bitrate} - time: ${progress.outTime}\r`);
       });
 
@@ -382,7 +435,7 @@ export class VideoService {
         stdout.write(data);
       });
 
-      const cancelCheck = setInterval(() => {
+      const cancelledJobChecker = setInterval(() => {
         const index = this.CanceledJobIds.findIndex(j => +j === +jobId);
         if (index === -1) return;
 
@@ -393,7 +446,7 @@ export class VideoService {
 
       ffmpeg.on('exit', (code: number) => {
         stdout.write('\n');
-        clearInterval(cancelCheck);
+        clearInterval(cancelledJobChecker);
         if (isCancelled) {
           reject(RejectCode.JOB_CANCEL);
         } else if (code !== 0) {
@@ -438,8 +491,8 @@ export class VideoService {
 
       ffmpeg.stderr.setEncoding('utf8');
       ffmpeg.stderr.on('data', (data) => {
-        const progress = this.parseProgress(data);
-        const percent = this.progressPercent(progress.outTimeMs, videoDuration);
+        const progress = parseProgress(data);
+        const percent = progressPercent(progress.outTimeMs, videoDuration * 1000000);
         stdout.write(`Encoding: ${percent}% - frame: ${progress.frame || 'N/A'} - fps: ${progress.fps || 'N/A'} - bitrate: ${progress.bitrate} - time: ${progress.outTime}\r`);
       });
 
@@ -514,56 +567,11 @@ export class VideoService {
     return storage;
   }
 
-  private parseProgress(data: string) {
-    const tLines = data.split('\n');
-    if (tLines.length < 5)
-      this.logger.info(data);
-    const progress = new Progress();
-    for (var i = 0; i < tLines.length; i++) {
-      const key = tLines[i].split('=');
-      switch (key[0]) {
-        case 'frame':
-          progress.frame = Number(key[1]);
-          break;
-        case 'fps':
-          progress.fps = Number(key[1]);
-          break;
-        case 'bitrate':
-          progress.bitrate = key[1];
-          break;
-        case 'total_size':
-          progress.totalSize = Number(key[1]);
-          break;
-        case 'out_time_us':
-          progress.outTimeUs = Number(key[1]);
-          break;
-        case 'out_time_ms':
-          progress.outTimeMs = Number(key[1]);
-          break;
-        case 'out_time':
-          progress.outTime = key[1];
-          break;
-        case 'dup_frames':
-          progress.dupFrames = Number(key[1]);
-          break;
-        case 'drop_frames':
-          progress.dropFrames = Number(key[1]);
-          break;
-        case 'speed':
-          progress.speed = key[1].trim();
-          break;
-        case 'progress':
-          progress.progress = key[1];
-          break;
-      }
-    }
-    return progress;
-  }
-
   private generateStatusJson(code: string, jobData: IVideoData) {
     const status = this.generateStatus(code, jobData);
-    this.logger.info(status);
-    return JSON.stringify(status);
+    const statusJson = JSON.stringify(status);
+    this.logger.error(`Error: ${code} - ${statusJson}`);
+    return statusJson;
   }
 
   private generateStatus(code: string, jobData: IVideoData) {
@@ -571,9 +579,5 @@ export class VideoService {
       code: code,
       ...jobData
     }
-  }
-
-  private progressPercent(current: number, videoDuration: number) {
-    return videoDuration ? Math.trunc(current / videoDuration * 100) : 0;
   }
 }

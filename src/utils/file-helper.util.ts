@@ -11,9 +11,14 @@ export async function findInFile(filePath: string, keyword: string) {
     crlfDelay: Infinity
   });
   for await (const line of rl) {
-    if (line === keyword)
+    if (line === keyword) {
+      rl.close();
+      fileStream.destroy();
       return true;
+    }
   }
+  rl.close();
+  fileStream.destroy();
   return false;
 }
 

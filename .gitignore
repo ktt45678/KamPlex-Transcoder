@@ -35,7 +35,7 @@ lerna-debug.log*
 !.vscode/extensions.json
 
 # Media temp files
-/data/*.*
+/data/*
 !/data/.gitkeep
 
 # dotenv environment variables file
