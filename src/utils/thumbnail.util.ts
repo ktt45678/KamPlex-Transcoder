@@ -209,7 +209,8 @@ function generateThumbnails(inputFile: string, outputFolder: string, tw: number,
 
       options.canceledJobIds = options.canceledJobIds.filter(id => +id > +options.jobId);
       isCancelled = true;
-      ffmpeg.kill('SIGINT'); // Stop key
+      ffmpeg.stdin.write('q');
+      ffmpeg.stdin.end();
     }, 5000)
 
     ffmpeg.on('exit', (code: number) => {

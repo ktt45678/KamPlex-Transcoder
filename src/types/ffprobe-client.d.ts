@@ -55,9 +55,9 @@ declare module 'ffprobe-client' {
       start_pts?: number | undefined;
       start_time?: number | undefined;
       duration_ts?: string | undefined;
-      duration?: number | undefined;
-      bit_rate?: number | undefined;
-      max_bit_rate?: number | undefined;
+      duration?: string | undefined;
+      bit_rate?: string | undefined;
+      max_bit_rate?: string | undefined;
       bits_per_raw_sample?: number | undefined;
       nb_frames?: number | undefined;
       nb_read_frames?: number | undefined;
