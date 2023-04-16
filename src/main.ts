@@ -4,6 +4,7 @@ import { WINSTON_MODULE_NEST_PROVIDER } from 'nest-winston';
 
 import { AppModule } from './app.module';
 import { PORT, ADDRESS } from './config';
+import { applyMongoDBPatches } from './utils/mongoose-helper.util';
 
 async function bootstrap() {
   const app = await NestFactory.create<NestFastifyApplication>(AppModule, new FastifyAdapter({ logger: true }));
@@ -13,4 +14,6 @@ async function bootstrap() {
   const address = process.env.ADDRESS || ADDRESS;
   await app.listen(port, address);
 }
+
+applyMongoDBPatches();
 bootstrap();

@@ -1,5 +1,5 @@
 export class IStorage {
-  _id: string;
+  _id: bigint;
   name: string;
   clientId: string;
   clientSecret: string;
@@ -12,5 +12,5 @@ export class IStorage {
   publicUrl: string;
   inStorage: string;
   used: number;
-  files: string[];
+  files: bigint[];
 }

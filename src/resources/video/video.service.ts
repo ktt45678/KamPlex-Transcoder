@@ -75,7 +75,7 @@ export class VideoService {
     if (!configExists) {
       this.logger.info(`Config for remote "${job.data.storage}" not found, generating...`);
       await mongoose.connect(this.configService.get<string>('DATABASE_URL'));
-      let externalStorage = await externalStorageModel.findById(job.data.storage).lean().exec();
+      let externalStorage = await externalStorageModel.findOne({ _id: job.data.storage }).lean().exec();
       await mongoose.disconnect();
       if (!externalStorage)
         throw new Error(this.generateStatusJson(StatusCode.STORAGE_NOT_FOUND, job.data));

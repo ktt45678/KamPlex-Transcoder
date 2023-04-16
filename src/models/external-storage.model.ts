@@ -1,7 +1,7 @@
 import { Schema, model } from 'mongoose';
 
 interface IExternalStorage {
-  _id: string;
+  _id: bigint;
   name: string;
   kind: number;
   clientId: string;
@@ -14,11 +14,11 @@ interface IExternalStorage {
   publicUrl: string;
   inStorage: string;
   used: number;
-  files: string[];
+  files: bigint[];
 }
 
 const externalStorageSchema = new Schema<IExternalStorage>({
-  _id: { type: String, required: true },
+  _id: { type: Schema.Types.Mixed, required: true },
   name: { type: String, required: true, unique: true },
   kind: { type: Number, required: true },
   accessToken: { type: String },
@@ -31,7 +31,7 @@ const externalStorageSchema = new Schema<IExternalStorage>({
   publicUrl: { type: String },
   inStorage: { type: String },
   used: { type: Number, default: 0 },
-  files: { type: [String] }
+  files: { type: [Schema.Types.Mixed] }
 });
 
 export const externalStorageModel = model<IExternalStorage>('externalstorage', externalStorageSchema);
