@@ -256,6 +256,7 @@ export class VideoService {
         listAttempt++;
       }
       this.logger.info(`${uploadedFiles.length}/${totalExpectedFiles} files uploaded`);
+      await job.discard();
     } catch (e) {
       this.logger.error(JSON.stringify(e));
       if (e === RejectCode.JOB_CANCEL) {
