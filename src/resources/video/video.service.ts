@@ -10,6 +10,7 @@ import { WINSTON_MODULE_PROVIDER } from 'nest-winston';
 import { Logger } from 'winston';
 
 import { externalStorageModel } from '../../models/external-storage.model';
+import { mediaStorageModel } from '../../models/media-storage.model';
 import { IVideoData, IJobData, IStorage, ISourceInfo, ISourceAudioInfo, IEncodeVideoAudioArgs, IEncodingSetting } from './interfaces';
 import { StatusCode } from '../../enums/status-code.enum';
 import { StreamCodec } from '../../enums/stream-codec.enum';
@@ -70,7 +71,6 @@ export class VideoService {
     const transcodeDir = `${this.configService.get<string>('TRANSCODE_DIR')}/${job.id}`;
     const ffmpegDir = this.configService.get<string>('FFMPEG_DIR');
 
-    //await deleteFile(rcloneConfigFile);
     const configExists = await findInFile(rcloneConfigFile, `[${job.data.storage}]`);
     if (!configExists) {
       this.logger.info(`Config for remote "${job.data.storage}" not found, generating...`);
@@ -129,9 +129,11 @@ export class VideoService {
     }
 
     const runtime = videoInfo.format.duration ? Math.trunc(+videoInfo.format.duration) : 0;
-    const videoDuration = videoTrack.duration ? Math.trunc(+videoTrack.duration) : 0;
+    const videoDuration = videoTrack.duration ? Math.trunc(+videoTrack.duration) : runtime;
     const videoFps = Math.ceil(divideFromString(videoTrack.r_frame_rate));
-    const videoBitrate = videoTrack.bit_rate ? Math.round(+videoTrack.bit_rate / 1000) : 0; // Bitrate in Kbps
+    const videoBitrate = videoTrack.bit_rate ? Math.round(+videoTrack.bit_rate / 1000) :
+      videoInfo.format.bit_rate ? Math.round(+videoInfo.format.bit_rate / 1000) : 0; // Bitrate in Kbps
+    const videoCodec = videoTrack.codec_name || '';
 
     const allQualityList = this.calculateQuality(videoTrack.height, qualityList);
     this.logger.info(`All quality: ${allQualityList.length ? allQualityList.join(', ') : 'None'}`);
@@ -143,14 +145,15 @@ export class VideoService {
 
     // Check already encoded files
     this.logger.info('Checking already encoded files');
-    let alreadyEncodedFiles = await this.findUploadedFiles(job.data.storage, job.data._id, job.id);
-    const availableQualityList = allQualityList.filter(quality =>
-      !alreadyEncodedFiles.find(file => file.Name === `${parsedInput.name}_${quality}.mp4`));
-    this.logger.info(`Avaiable quality: ${availableQualityList.length ? availableQualityList.join(', ') : 'None'}`);
+    let alreadyEncodedFiles = await this.findUploadedFiles(job.data.storage, job.data._id, job.id, `${this.thumbnailFolder}/**`);
+    const availableQualityList = await this.findAvailableQuality(alreadyEncodedFiles, allQualityList, parsedInput, codec,
+      job.data.replaceStreams);
+    this.logger.info(`Available quality: ${availableQualityList.length ? availableQualityList.join(', ') : 'None'}`);
     if (!availableQualityList.length) {
+      this.logger.info('Everything is already encoded, no need to continue');
       await deleteFolder(transcodeDir);
       await job.discard();
-      throw new Error(this.generateStatusJson(StatusCode.LOW_QUALITY_VIDEO, job.data));
+      return this.generateStatus(StatusCode.CANCELLED_ENCODING, job.data);
     }
 
     const srcWidth = videoTrack.width || 0;
@@ -216,7 +219,7 @@ export class VideoService {
     const encodeVideoAudioArgs: IEncodeVideoAudioArgs = { inputs: audioInputForVideo, maps: audioMapForVideo };
 
     try {
-      const sourceInfo: ISourceInfo = { videoDuration, videoFps, videoBitrate };
+      const sourceInfo: ISourceInfo = { videoDuration, videoFps, videoBitrate, videoCodec };
       if (codec === StreamCodec.H264_AAC) {
         this.logger.info('Video codec: H264');
         await this.encodeByCodec(inputFile, parsedInput, encodeVideoAudioArgs, sourceInfo,
@@ -242,17 +245,29 @@ export class VideoService {
         jobId: job.id,
         canceledJobIds: this.CanceledJobIds
       });
-      const rcloneMoveThumbArgs = this.createRcloneMoveThumbArgs(parsedInput, job.data.storage, job.data._id);
+      const syncThumbnails = !!job.data.update;
+      const rcloneMoveThumbArgs = this.createRcloneMoveThumbArgs(parsedInput, job.data.storage, job.data._id, syncThumbnails);
       await this.uploadMedia(rcloneMoveThumbArgs, job.id);
+
+      if (job.data.replaceStreams?.length) {
+        this.logger.info('Removing old streams');
+        for (let i = 0; i < job.data.replaceStreams.length; i++) {
+          await deletePath(this.configService.get<string>('RCLONE_CONFIG_FILE'), this.configService.get<string>('RCLONE_DIR'),
+            job.data.storage, `${job.data._id}/${job.data.replaceStreams[i]}`, (args => {
+              this.logger.info('rclone ' + args.join(' '));
+            }))
+        }
+      }
 
       // Check uploaded files
       this.logger.info('Checking uploaded files');
-      let uploadedFiles = await this.findUploadedFiles(job.data.storage, job.data._id, job.id);
+      const checkFilesExclusion = `${this.thumbnailFolder}/**`;
+      let uploadedFiles = await this.findUploadedFiles(job.data.storage, job.data._id, job.id, checkFilesExclusion);
       let listAttempt = 1;
       const totalExpectedFiles = availableQualityList.length + 1;
       const maxTries = 5;
       while (uploadedFiles.length < totalExpectedFiles && listAttempt < maxTries) {
-        uploadedFiles = await this.findUploadedFiles(job.data.storage, job.data._id, job.id);
+        uploadedFiles = await this.findUploadedFiles(job.data.storage, job.data._id, job.id, checkFilesExclusion);
         listAttempt++;
       }
       this.logger.info(`${uploadedFiles.length}/${totalExpectedFiles} files uploaded`);
@@ -299,7 +314,7 @@ export class VideoService {
       try {
         if (codec === StreamCodec.H264_AAC) {
           const videoArgs = this.createVideoEncodingArgs(inputFile, parsedInput, audioArgs, qualityList[i], videoParams,
-            sourceInfo, perQualitySettings);
+            sourceInfo, 'crf', perQualitySettings);
           const rcloneMoveArgs = this.createRcloneMoveArgs(`${parsedInput.dir}/${parsedInput.name}_${qualityList[i]}.mp4`,
             `${job.data.storage}:${job.data._id}/${streamId}`);
           await this.encodeMedia(videoArgs, videoDuration, job.id);
@@ -307,10 +322,10 @@ export class VideoService {
         } else {
           // Pass 1 params
           const videoPass1Args = this.createTwoPassesVideoEncodingArgs(inputFile, parsedInput, audioArgs, qualityList[i], videoParams,
-            sourceInfo, 1, perQualitySettings);
+            sourceInfo, 'cq', 1, perQualitySettings);
           // Pass 2 params
           const videoPass2Args = this.createTwoPassesVideoEncodingArgs(inputFile, parsedInput, audioArgs, qualityList[i], videoParams,
-            sourceInfo, 2, perQualitySettings);
+            sourceInfo, 'cq', 2, perQualitySettings);
           const rcloneMoveArgs = this.createRcloneMoveArgs(`${parsedInput.dir}/${parsedInput.name}_${qualityList[i]}.mp4`,
             `${job.data.storage}:${job.data._id}/${streamId}`);
           await this.encodeMedia(videoPass1Args, videoDuration, job.id);
@@ -360,7 +375,7 @@ export class VideoService {
   }
 
   private createVideoEncodingArgs(inputFile: string, parsedInput: path.ParsedPath, audioArgs: IEncodeVideoAudioArgs,
-    quality: number, videoParams: string[], sourceInfo: ISourceInfo, encodingSetting?: IEncodingSetting) {
+    quality: number, videoParams: string[], sourceInfo: ISourceInfo, crfKey: 'crf' | 'cq', encodingSetting?: IEncodingSetting) {
     const gopSize = (sourceInfo.videoFps ? sourceInfo.videoFps * 2 : 48).toString();
     const args: string[] = [
       '-hide_banner', '-y',
@@ -373,7 +388,7 @@ export class VideoService {
       '-keyint_min', gopSize
     ];
     if (encodingSetting)
-      this.resolveEncodingSettings(args, encodingSetting, sourceInfo);
+      this.resolveEncodingSettings(args, encodingSetting, sourceInfo, crfKey);
     args.push(
       '-map', '0:v:0',
       ...audioArgs.maps,
@@ -386,7 +401,8 @@ export class VideoService {
   }
 
   private createTwoPassesVideoEncodingArgs(inputFile: string, parsedInput: path.ParsedPath, audioArgs: IEncodeVideoAudioArgs,
-    quality: number, videoParams: string[], sourceInfo: ISourceInfo, pass: number = 1, encodingSetting?: IEncodingSetting) {
+    quality: number, videoParams: string[], sourceInfo: ISourceInfo, crfKey: 'crf' | 'cq', pass: number = 1,
+    encodingSetting?: IEncodingSetting) {
     const gopSize = (sourceInfo.videoFps ? sourceInfo.videoFps * 2 : 48).toString();
     if (pass === 1) {
       const outputName = process.platform === 'win32' ? 'NUL' : '/dev/null';
@@ -400,7 +416,7 @@ export class VideoService {
         '-keyint_min', gopSize
       ];
       if (encodingSetting)
-        this.resolveEncodingSettings(args, encodingSetting, sourceInfo);
+        this.resolveEncodingSettings(args, encodingSetting, sourceInfo, crfKey);
       args.push(
         '-map', '0:v:0',
         '-map_metadata', '-1',
@@ -423,7 +439,7 @@ export class VideoService {
       '-keyint_min', gopSize
     ];
     if (encodingSetting)
-      this.resolveEncodingSettings(args, encodingSetting, sourceInfo);
+      this.resolveEncodingSettings(args, encodingSetting, sourceInfo, crfKey);
     args.push(
       '-map', '0:v:0',
       ...audioArgs.maps,
@@ -437,11 +453,14 @@ export class VideoService {
     return args;
   }
 
-  private resolveEncodingSettings(args: string[], encodingSetting: IEncodingSetting, sourceInfo: ISourceInfo) {
-    encodingSetting.crf && args.push('-crf', encodingSetting.crf.toString());
-    if (encodingSetting.useLowerRate && sourceInfo.videoBitrate > 0 && sourceInfo.videoBitrate < encodingSetting.maxrate) {
-      encodingSetting.maxrate && args.push('-maxrate', `${sourceInfo.videoBitrate}K`);
-      encodingSetting.bufsize && args.push('-bufsize', `${sourceInfo.videoBitrate * 2}K`);
+  private resolveEncodingSettings(args: string[], encodingSetting: IEncodingSetting, sourceInfo: ISourceInfo,
+    crfKey: 'crf' | 'cq' = 'crf') {
+    encodingSetting[crfKey] && args.push('-crf', encodingSetting[crfKey].toString());
+    // Should double the bitrate when the source codec isn't h264 (could be h265, vp9 or av1)
+    const baseBitrate = sourceInfo.videoCodec === 'h264' ? sourceInfo.videoBitrate : sourceInfo.videoBitrate * 2;
+    if (encodingSetting.useLowerRate && baseBitrate > 0 && baseBitrate < encodingSetting.maxrate) {
+      encodingSetting.maxrate && args.push('-maxrate', `${baseBitrate}K`);
+      encodingSetting.bufsize && args.push('-bufsize', `${baseBitrate * 2}K`);
     } else {
       encodingSetting.maxrate && args.push('-maxrate', `${encodingSetting.maxrate}K`);
       encodingSetting.bufsize && args.push('-bufsize', `${encodingSetting.bufsize}K`);
@@ -471,12 +490,13 @@ export class VideoService {
     return args;
   }
 
-  private createRcloneMoveThumbArgs(parsedInput: path.ParsedPath, remote: string, parentFolder: string) {
+  private createRcloneMoveThumbArgs(parsedInput: path.ParsedPath, remote: string, parentFolder: string, sync: boolean = false) {
+    const targetCommand = sync ? 'sync' : 'move';
     const rcloneConfigFile = this.configService.get<string>('RCLONE_CONFIG_FILE');
     const args: string[] = [
       '--config', rcloneConfigFile,
       '--low-level-retries', '5',
-      'move',
+      targetCommand,
       `"${parsedInput.dir}/${this.thumbnailFolder}"`,
       `"${remote}:${parentFolder}/${this.thumbnailFolder}"`
     ];
@@ -593,13 +613,16 @@ export class VideoService {
     });
   }
 
-  private findUploadedFiles(remote: string, parentFolder: string, jobId: string | number) {
+  private findUploadedFiles(remote: string, parentFolder: string, jobId: string | number, exclude?: string) {
     const rcloneConfigFile = this.configService.get<string>('RCLONE_CONFIG_FILE');
     const args: string[] = [
       '--config', rcloneConfigFile,
       'lsjson', `${remote}:${parentFolder}`,
       '--recursive', '--files-only'
     ];
+    if (exclude) {
+      args.push('--exclude', exclude);
+    }
     return new Promise<RcloneFile[]>((resolve, reject) => {
       let isCancelled = false;
       this.logger.info('rclone ' + args.join(' '));
@@ -636,8 +659,29 @@ export class VideoService {
     });
   }
 
+  private async findAvailableQuality(uploadedFiles: RcloneFile[], allQualityList: number[], parsedInput: path.ParsedPath,
+    codec: number, replaceStreams?: string[]) {
+    const fileIds: bigint[] = [];
+    for (let i = 0; i < uploadedFiles.length; i++) {
+      if (!allQualityList.find(q => uploadedFiles[i].Name === `${parsedInput.name}_${q}.mp4`))
+        continue;
+      const stringId = uploadedFiles[i].Path.split('/')[0];
+      if (replaceStreams?.includes(stringId))
+        continue;
+      if (isNaN(<any>stringId))
+        continue;
+      fileIds.push(BigInt(stringId));
+    }
+    await mongoose.connect(this.configService.get<string>('DATABASE_URL'));
+    const fileList = await mediaStorageModel.find({ _id: { $in: fileIds }, codec }).lean().exec();
+    await mongoose.disconnect();
+    const qualityList = fileList.map(file => file.quality);
+    const availableQualityList = allQualityList.filter(quality => !qualityList.includes(quality));
+    return availableQualityList;
+  }
+
   private calculateQuality(height: number, qualityList: number[]) {
-    const availableQualityList = [];
+    const availableQualityList: number[] = [];
     if (!height) return availableQualityList;
     for (let i = 0; i < qualityList.length; i++) {
       if (height >= qualityList[i]) {

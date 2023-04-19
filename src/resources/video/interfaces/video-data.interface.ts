@@ -1,5 +1,3 @@
-import { User } from './user.interface';
-
 export interface IVideoData {
   _id: string;
   filename: string;
@@ -16,7 +14,9 @@ export interface IVideoData {
   qualityList: number[];
   encodingSettings: IEncodingSetting[];
   isPrimary: boolean;
-  user: User;
+  user: string;
+  update?: boolean;
+  replaceStreams?: string[];
 }
 
 export interface IEncodingSetting {

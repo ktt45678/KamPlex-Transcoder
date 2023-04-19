@@ -42,13 +42,17 @@ export function downloadFile(configPath: string, rcloneDir: string, remote: stri
   //console.log('\x1b[36m%s\x1b[0m', 'rclone ' + args.join(' '));
   return new Promise<void>((resolve, reject) => {
     const rclone = child_process.spawn(`${rcloneDir}/rclone`, args, { shell: true });
+    let errorMessage = '';
     rclone.stderr.setEncoding('utf8');
     rclone.stderr.on('data', (data) => {
-      reject(data);
+      errorMessage += data + '\n';
     });
 
-    rclone.on('close', () => {
-      resolve();
+    rclone.on('exit', (code) => {
+      if (code === 0 || code === 9)
+        resolve();
+      else
+        reject({ code: code, message: errorMessage })
     });
   });
 }
@@ -59,18 +63,22 @@ export async function deletePath(configPath: string, rcloneDir: string, remote: 
     'purge', `${remote}:${path}`
   ];
   logFn(args);
-  const filesExist = await listJson(configPath, rcloneDir, remote, path);
-  if (!filesExist.length) return;
+  const pathExist = await isPathExist(configPath, rcloneDir, remote, path);
+  if (!pathExist) return;
   //console.log('\x1b[36m%s\x1b[0m', 'rclone ' + args.join(' '));
   return new Promise<void>((resolve, reject) => {
     const rclone = child_process.spawn(`${rcloneDir}/rclone`, args, { shell: true });
+    let errorMessage = '';
     rclone.stderr.setEncoding('utf8');
     rclone.stderr.on('data', (data) => {
-      reject(data);
+      errorMessage += data + '\n';
     });
 
-    rclone.on('close', () => {
-      resolve();
+    rclone.on('exit', (code) => {
+      if (code === 0 || code === 9)
+        resolve();
+      else
+        reject({ code: code, message: errorMessage })
     });
   });
 }
@@ -85,13 +93,17 @@ export function deleteRemote(configPath: string, rcloneDir: string, remote: stri
   //console.log('\x1b[36m%s\x1b[0m', 'rclone ' + args.join(' '));
   return new Promise<void>((resolve, reject) => {
     const rclone = child_process.spawn(`${rcloneDir}/rclone`, args, { shell: true });
+    let errorMessage = '';
     rclone.stderr.setEncoding('utf8');
     rclone.stderr.on('data', (data) => {
-      reject(data);
+      errorMessage += data + '\n';
     });
 
-    rclone.on('close', () => {
-      resolve();
+    rclone.on('exit', (code) => {
+      if (code === 0 || code === 9)
+        resolve();
+      else
+        reject({ code: code, message: errorMessage })
     });
   });
 }
@@ -104,24 +116,45 @@ export function listJson(configPath: string, rcloneDir: string, remote: string, 
   if (filterPath) {
     args.push('--include', `/${filterPath}/`);
   }
+  //console.log('\x1b[36m%s\x1b[0m', 'rclone ' + args.join(' '));
   return new Promise<RcloneFile[]>((resolve, reject) => {
     const rclone = child_process.spawn(`${rcloneDir}/rclone`, args, { shell: true });
     let listJson = '';
+    let errorMessage = '';
     rclone.stdout.setEncoding('utf8');
     rclone.stdout.on('data', (data) => {
       listJson += data;
     });
     rclone.stderr.setEncoding('utf8');
     rclone.stderr.on('data', (data) => {
-      reject(data);
+      errorMessage += data + '\n';
     });
 
     rclone.on('exit', (code: number) => {
       if (code !== 0) {
-        reject(`Error listing files, rclone exited with status code: ${code}`);
+        reject({ code: code, message: errorMessage });
       } else {
         const fileData = JSON.parse(listJson);
         resolve(fileData);
+      }
+    });
+  });
+}
+
+export function isPathExist(configPath: string, rcloneDir: string, remote: string, path: string) {
+  const args: string[] = [
+    '--config', `"${configPath}"`,
+    '--low-level-retries', '1',
+    'lsd', `${remote}:${path}`
+  ];
+  //console.log('\x1b[36m%s\x1b[0m', 'rclone ' + args.join(' '));
+  return new Promise<boolean>((resolve) => {
+    const rclone = child_process.spawn(`${rcloneDir}/rclone`, args, { shell: true });
+    rclone.on('exit', (code: number) => {
+      if (code !== 0) {
+        resolve(false);
+      } else {
+        resolve(true);
       }
     });
   });
