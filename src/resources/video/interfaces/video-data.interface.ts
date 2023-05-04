@@ -3,6 +3,7 @@ export interface IVideoData {
   filename: string;
   size: number;
   mimeType: string;
+  producerUrl: string;
   storage: string;
   media: string;
   episode?: string;

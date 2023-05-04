@@ -22,6 +22,24 @@ export async function findInFile(filePath: string, keyword: string) {
   return false;
 }
 
+export async function readAllLines(filePath: string) {
+  const lines = [];
+  const isFileExists = await fileExists(filePath);
+  if (!isFileExists)
+    return lines;
+  const fileStream = fs.createReadStream(filePath);
+  const rl = readline.createInterface({
+    input: fileStream,
+    crlfDelay: Infinity
+  });
+  for await (const line of rl) {
+    lines.push(line);
+  }
+  rl.close();
+  fileStream.destroy();
+  return lines;
+}
+
 export function appendToFile(filePath: string, content: string) {
   return fs.promises.appendFile(filePath, content);
 }

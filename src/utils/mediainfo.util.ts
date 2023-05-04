@@ -1,0 +1,141 @@
+import child_process from 'child_process';
+
+const KNWON_ENCODING_SETTINGS = ['cabac', 'ref', 'deblock', 'analyse', 'me', 'subme', 'psy', 'psy_rd', 'mixed_ref', 'me_range',
+  'chroma_me', 'trellis', '8x8dct', 'deadzone', 'fast_pskip', 'chroma_qp_offset', 'threads', 'lookahead_threads', 'sliced_threads',
+  'nr', 'decimate', 'interlaced', 'bluray_compat', 'constrained_intra', 'bframes', 'b_pyramid', 'b_adapt', 'b_bias', 'direct',
+  'weightb', 'open_gop', 'weightp', 'keyint', 'keyint_min', 'scenecut', 'intra_refresh', 'rc_lookahead', 'rc', 'mbtree', 'crf',
+  'qcomp', 'qpmin', 'qpmax', 'qpstep', 'vbv_maxrate', 'vbv_bufsize', 'crf_max', 'nal_hrd', 'filler', 'ip_ratio', 'aq'
+];
+
+export function getMediaInfo(mediainfoDir: string, input: string) {
+  const args: string[] = [
+    `"${input}"`,
+    '--output=JSON'
+  ];
+  return new Promise<MediaInfoResult>((resolve, reject) => {
+    const mediainfo = child_process.spawn(`${mediainfoDir}/mediainfo`, args, { shell: true });
+    let infoJson = '';
+    let errorMessage = '';
+    mediainfo.stdout.setEncoding('utf8');
+    mediainfo.stdout.on('data', (data) => {
+      infoJson += data;
+    });
+    mediainfo.stderr.setEncoding('utf8');
+    mediainfo.stderr.on('data', (data) => {
+      errorMessage += data + '\n';
+    });
+
+    mediainfo.on('exit', (code: number) => {
+      if (code !== 0) {
+        reject({ code: code, message: errorMessage });
+      } else {
+        const fileData = JSON.parse(infoJson);
+        resolve(fileData);
+      }
+    });
+  });
+}
+
+export function createx264Params(encodedLibrarySettings: string) {
+  if (!encodedLibrarySettings) return '';
+  const settingList = encodedLibrarySettings.replace(/:/g, '\\:').split(' / ');
+  const filteredList = settingList.filter(value => {
+    const key = value.split('=')[0];
+    if (KNWON_ENCODING_SETTINGS.indexOf(key) > -1)
+      return true
+    return false;
+  });
+  return filteredList.join(':');
+}
+
+export interface MediaInfoResult {
+  creatingLibrary: CreatingLibraryInfo;
+  media: MediaInfoData;
+}
+
+export interface MediaInfoData {
+  '@ref': string;
+  track: TrackInfo[];
+}
+
+export interface TrackInfo {
+  '@type': string;
+  VideoCount?: string;
+  AudioCount?: string;
+  FileExtension?: string;
+  Format: string;
+  Format_Profile?: string;
+  CodecID: string;
+  CodecID_Compatible?: string;
+  FileSize?: string;
+  Duration: string;
+  OverallBitRate?: string;
+  FrameRate: string;
+  FrameCount: string;
+  StreamSize: string;
+  HeaderSize?: string;
+  DataSize?: string;
+  FooterSize?: string;
+  IsStreamable?: string;
+  File_Created_Date?: string;
+  File_Created_Date_Local?: string;
+  File_Modified_Date?: string;
+  File_Modified_Date_Local?: string;
+  Encoded_Application?: string;
+  StreamOrder?: string;
+  ID?: string;
+  Format_Level?: string;
+  Format_Settings_CABAC?: string;
+  Format_Settings_RefFrames?: string;
+  BitRate?: string;
+  BitRate_Maximum?: string;
+  Width?: string;
+  Height?: string;
+  Stored_Height?: string;
+  Sampled_Width?: string;
+  Sampled_Height?: string;
+  PixelAspectRatio?: string;
+  DisplayAspectRatio?: string;
+  Rotation?: string;
+  FrameRate_Mode?: string;
+  FrameRate_Mode_Original?: string;
+  ColorSpace?: string;
+  ChromaSubsampling?: string;
+  BitDepth?: string;
+  ScanType?: string;
+  Title?: string;
+  Encoded_Library?: string;
+  Encoded_Library_Name?: string;
+  Encoded_Library_Version?: string;
+  Encoded_Library_Settings?: string;
+  Language?: string;
+  extra?: ExtraInfo;
+  Format_AdditionalFeatures?: string;
+  Source_Duration?: string;
+  BitRate_Mode?: string;
+  Channels?: string;
+  ChannelPositions?: string;
+  ChannelLayout?: string;
+  SamplesPerFrame?: string;
+  SamplingRate?: string;
+  SamplingCount?: string;
+  Source_FrameCount?: string;
+  Compression_Mode?: string;
+  StreamSize_Proportion?: string;
+  Source_StreamSize?: string;
+  Source_StreamSize_Proportion?: string;
+  Default?: string;
+  AlternateGroup?: string;
+}
+
+interface ExtraInfo {
+  CodecConfigurationBox?: string;
+  Source_Delay?: string;
+  Source_Delay_Source?: string;
+}
+
+interface CreatingLibraryInfo {
+  name: string;
+  version: string;
+  url: string;
+}

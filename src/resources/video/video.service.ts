@@ -25,6 +25,7 @@ import { createSnowFlakeId } from '../../utils/snowflake-id.util';
 import { divideFromString } from '../../utils/string-helper.util';
 import { ENCODING_QUALITY, AUDIO_PARAMS, AUDIO_2ND_PARAMS, VIDEO_H264_PARAMS, VIDEO_VP9_PARAMS, VIDEO_AV1_PARAMS } from '../../config';
 import { RcloneFile } from '../../common/interfaces';
+import { KamplexApiService } from '../../common/modules/kamplex-api';
 
 @Injectable()
 export class VideoService {
@@ -36,7 +37,8 @@ export class VideoService {
   private CanceledJobIds: (string | number)[];
   private thumbnailFolder: string;
 
-  constructor(@Inject(WINSTON_MODULE_PROVIDER) private readonly logger: Logger, private configService: ConfigService) {
+  constructor(@Inject(WINSTON_MODULE_PROVIDER) private readonly logger: Logger, private configService: ConfigService,
+    private kamplexApiService: KamplexApiService) {
     const audioParams = this.configService.get<string>('AUDIO_PARAMS');
     this.AudioParams = audioParams ? audioParams.split(' ') : AUDIO_PARAMS;
     const audio2ndParams = this.configService.get<string>('AUDIO_2ND_PARAMS');
@@ -56,6 +58,7 @@ export class VideoService {
     if (cancelIndex > -1) {
       this.CanceledJobIds = this.CanceledJobIds.filter(id => +id > +job.id);
       this.logger.info(`Received cancel signal from job id: ${job.id}`);
+      await this.kamplexApiService.ensureProducerAppIsOnline(job.data.producerUrl);
       return this.generateStatus(StatusCode.CANCELLED_ENCODING, job.data);
     }
 
@@ -77,8 +80,10 @@ export class VideoService {
       await mongoose.connect(this.configService.get<string>('DATABASE_URL'));
       let externalStorage = await externalStorageModel.findOne({ _id: BigInt(job.data.storage) }).lean().exec();
       await mongoose.disconnect();
-      if (!externalStorage)
-        throw new Error(this.generateStatusJson(StatusCode.STORAGE_NOT_FOUND, job.data));
+      if (!externalStorage) {
+        const statusJson = await this.generateStatusJson(StatusCode.STORAGE_NOT_FOUND, job.data);
+        throw new Error(statusJson);
+      }
       externalStorage = await this.decryptToken(externalStorage);
       const newConfig = createRcloneConfig(externalStorage);
       await appendToFile(rcloneConfigFile, newConfig);
@@ -99,7 +104,8 @@ export class VideoService {
     } catch (e) {
       this.logger.error(e);
       await deleteFolder(transcodeDir);
-      throw new Error(this.generateStatusJson(StatusCode.DOWNLOAD_FAILED, job.data));
+      const statusJson = await this.generateStatusJson(StatusCode.DOWNLOAD_FAILED, job.data);
+      throw new Error(statusJson);
     }
     let videoInfo: FFprobe.FFProbeResult;
     this.logger.info(`Processing input file: ${inputFile}`);
@@ -109,7 +115,8 @@ export class VideoService {
       this.logger.error(e);
       await deleteFolder(transcodeDir);
       await job.discard();
-      throw new Error(this.generateStatusJson(StatusCode.PROBE_FAILED, job.data));
+      const statusJson = await this.generateStatusJson(StatusCode.PROBE_FAILED, job.data);
+      throw new Error(statusJson);
     }
 
     const videoTrack = videoInfo.streams.find(s => s.codec_type === 'video');
@@ -117,7 +124,8 @@ export class VideoService {
       this.logger.error('Video track not found');
       await deleteFolder(transcodeDir);
       await job.discard();
-      throw new Error(this.generateStatusJson(StatusCode.NO_VIDEO_TRACK, job.data));
+      const statusJson = await this.generateStatusJson(StatusCode.NO_VIDEO_TRACK, job.data);
+      throw new Error(statusJson);
     }
 
     const audioTracks = videoInfo.streams.filter(s => s.codec_type === 'audio');
@@ -125,7 +133,8 @@ export class VideoService {
       this.logger.error('Audio track not found');
       await deleteFolder(transcodeDir);
       await job.discard();
-      throw new Error(this.generateStatusJson(StatusCode.NO_AUDIO_TRACK, job.data));
+      const statusJson = await this.generateStatusJson(StatusCode.NO_AUDIO_TRACK, job.data);
+      throw new Error(statusJson);
     }
 
     const runtime = videoInfo.format.duration ? Math.trunc(+videoInfo.format.duration) : 0;
@@ -140,7 +149,8 @@ export class VideoService {
     if (!allQualityList.length) {
       await deleteFolder(transcodeDir);
       await job.discard();
-      throw new Error(this.generateStatusJson(StatusCode.LOW_QUALITY_VIDEO, job.data));
+      const statusJson = await this.generateStatusJson(StatusCode.LOW_QUALITY_VIDEO, job.data);
+      throw new Error(statusJson);
     }
 
     // Check already encoded files
@@ -153,6 +163,8 @@ export class VideoService {
       this.logger.info('Everything is already encoded, no need to continue');
       await deleteFolder(transcodeDir);
       await job.discard();
+      // generateStatus here, not generateStatusJson
+      await this.kamplexApiService.ensureProducerAppIsOnline(job.data.producerUrl);
       return this.generateStatus(StatusCode.CANCELLED_ENCODING, job.data);
     }
 
@@ -160,6 +172,8 @@ export class VideoService {
     const srcHeight = videoTrack.height || 0;
 
     this.logger.info(`Video resolution: ${srcWidth}x${srcHeight}`);
+
+    await this.kamplexApiService.ensureProducerAppIsOnline(job.data.producerUrl);
 
     await job.progress({
       code: ProgressCode.UPDATE_SOURCE,
@@ -192,7 +206,8 @@ export class VideoService {
         this.logger.info(`Received cancel signal from job id: ${job.id}`);
         return this.generateStatus(StatusCode.CANCELLED_ENCODING, job.data);
       }
-      throw new Error(this.generateStatusJson(StatusCode.ENCODE_AUDIO_FAILED, job.data));
+      const statusJson = await this.generateStatusJson(StatusCode.ENCODE_AUDIO_FAILED, job.data);
+      throw new Error(statusJson);
     }
     audioInputForVideo.push('-i', `"${parsedInput.dir}/${parsedInput.name}_audio_${firstAudioTrack.index}.mp4"`);
     audioMapForVideo.push('-map', '1:a:0');
@@ -210,7 +225,8 @@ export class VideoService {
           this.logger.info(`Received cancel signal from job id: ${job.id}`);
           return this.generateStatus(StatusCode.CANCELLED_ENCODING, job.data);
         }
-        throw new Error(this.generateStatusJson(StatusCode.ENCODE_AUDIO_FAILED, job.data));
+        const statusJson = await this.generateStatusJson(StatusCode.ENCODE_AUDIO_FAILED, job.data);
+        throw new Error(statusJson);
       }
       audioInputForVideo.push('-i', `"${parsedInput.dir}/${parsedInput.name}_audio_${secondAudioTrack.index}.mp4"`);
       audioMapForVideo.push('-map', '2:a:0');
@@ -277,14 +293,17 @@ export class VideoService {
       if (e === RejectCode.JOB_CANCEL) {
         this.logger.info(`Received cancel signal from job id: ${job.id}`);
         await job.discard();
+        await this.kamplexApiService.ensureProducerAppIsOnline(job.data.producerUrl);
         return this.generateStatus(StatusCode.CANCELLED_ENCODING, job.data);
       }
-      throw new Error(this.generateStatusJson(StatusCode.ENCODE_VIDEO_FAILED, job.data));
+      const statusJson = await this.generateStatusJson(StatusCode.ENCODE_VIDEO_FAILED, job.data);
+      throw new Error(statusJson);
     } finally {
       this.logger.info('Cleaning up');
       await deleteFolder(transcodeDir);
       this.logger.info('Completed');
     }
+    await this.kamplexApiService.ensureProducerAppIsOnline(job.data.producerUrl);
     return this.generateStatus(StatusCode.FINISHED_ENCODING, job.data);
   }
 
@@ -346,6 +365,9 @@ export class VideoService {
         }
         throw e;
       }
+
+      await this.kamplexApiService.ensureProducerAppIsOnline(job.data.producerUrl);
+
       await job.progress({
         code: ProgressCode.ADD_STREAM_VIDEO,
         sourceId: job.data._id,
@@ -703,10 +725,11 @@ export class VideoService {
     return storage;
   }
 
-  private generateStatusJson(code: string, jobData: IVideoData) {
+  private async generateStatusJson(code: string, jobData: IVideoData) {
     const status = this.generateStatus(code, jobData);
     const statusJson = JSON.stringify(status);
     this.logger.error(`Error: ${code} - ${statusJson}`);
+    await this.kamplexApiService.ensureProducerAppIsOnline(jobData.producerUrl);
     return statusJson;
   }
 

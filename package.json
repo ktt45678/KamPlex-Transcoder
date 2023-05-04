@@ -21,6 +21,7 @@
     "test:e2e": "jest --config ./test/jest-e2e.json"
   },
   "dependencies": {
+    "@nestjs/axios": "^2.0.0",
     "@nestjs/bull": "^0.6.3",
     "@nestjs/common": "^9.4.0",
     "@nestjs/config": "^2.3.1",
@@ -28,6 +29,7 @@
     "@nestjs/mapped-types": "^1.2.2",
     "@nestjs/mongoose": "^9.2.2",
     "@nestjs/platform-fastify": "^9.4.0",
+    "axios": "^1.4.0",
     "bull": "^4.10.4",
     "ffprobe-client": "^1.1.6",
     "luxon": "^3.3.0",
