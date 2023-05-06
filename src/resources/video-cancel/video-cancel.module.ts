@@ -1,5 +1,5 @@
 import { Module } from '@nestjs/common';
-import { BullModule } from '@nestjs/bull';
+import { BullModule } from '@nestjs/bullmq';
 
 import { VideoModule } from '../video/video.module';
 import { VideoCancelConsumer } from './video-cancel.consumer';
@@ -12,7 +12,8 @@ import { TaskQueue } from '../../enums/task-queue.enum';
       name: TaskQueue.VIDEO_CANCEL,
       defaultJobOptions: {
         removeOnComplete: true,
-        removeOnFail: true
+        removeOnFail: true,
+        attempts: 3
       }
     })
   ],

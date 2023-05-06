@@ -3,17 +3,17 @@ import child_process from 'child_process';
 const KNWON_ENCODING_SETTINGS = ['cabac', 'ref', 'deblock', 'analyse', 'me', 'subme', 'psy', 'psy_rd', 'mixed_ref', 'me_range',
   'chroma_me', 'trellis', '8x8dct', 'deadzone', 'fast_pskip', 'chroma_qp_offset', 'threads', 'lookahead_threads', 'sliced_threads',
   'nr', 'decimate', 'interlaced', 'bluray_compat', 'constrained_intra', 'bframes', 'b_pyramid', 'b_adapt', 'b_bias', 'direct',
-  'weightb', 'open_gop', 'weightp', 'keyint', 'keyint_min', 'scenecut', 'intra_refresh', 'rc_lookahead', 'rc', 'mbtree', 'crf',
-  'qcomp', 'qpmin', 'qpmax', 'qpstep', 'vbv_maxrate', 'vbv_bufsize', 'crf_max', 'nal_hrd', 'filler', 'ip_ratio', 'aq'
+  'weightb', 'open_gop', 'weightp', 'scenecut', 'intra_refresh', 'rc_lookahead', 'rc', 'mbtree',
+  'qcomp', 'qpmin', 'qpmax', 'qpstep', 'nal_hrd', 'filler', 'ip_ratio', 'aq'
 ];
 
-export function getMediaInfo(mediainfoDir: string, input: string) {
+export function getMediaInfo(input: string, mediainfoPath: string) {
   const args: string[] = [
     `"${input}"`,
     '--output=JSON'
   ];
   return new Promise<MediaInfoResult>((resolve, reject) => {
-    const mediainfo = child_process.spawn(`${mediainfoDir}/mediainfo`, args, { shell: true });
+    const mediainfo = child_process.spawn(mediainfoPath, args, { shell: true });
     let infoJson = '';
     let errorMessage = '';
     mediainfo.stdout.setEncoding('utf8');
@@ -36,7 +36,7 @@ export function getMediaInfo(mediainfoDir: string, input: string) {
   });
 }
 
-export function createx264Params(encodedLibrarySettings: string) {
+export function createH264Params(encodedLibrarySettings: string) {
   if (!encodedLibrarySettings) return '';
   const settingList = encodedLibrarySettings.replace(/:/g, '\\:').split(' / ');
   const filteredList = settingList.filter(value => {
@@ -59,7 +59,7 @@ export interface MediaInfoData {
 }
 
 export interface TrackInfo {
-  '@type': string;
+  '@type': 'General' | 'Video' | 'Audio' | 'Text';
   VideoCount?: string;
   AudioCount?: string;
   FileExtension?: string;

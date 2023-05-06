@@ -1,6 +1,7 @@
 import { Inject, Injectable } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { Job } from 'bull';
+import { InjectQueue } from '@nestjs/bullmq';
+import { Job, Queue, UnrecoverableError } from 'bullmq';
 import mongoose from 'mongoose';
 import { stdout } from 'process';
 import child_process from 'child_process';
@@ -11,21 +12,21 @@ import { Logger } from 'winston';
 
 import { externalStorageModel } from '../../models/external-storage.model';
 import { mediaStorageModel } from '../../models/media-storage.model';
-import { IVideoData, IJobData, IStorage, ISourceInfo, ISourceAudioInfo, IEncodeVideoAudioArgs, IEncodingSetting } from './interfaces';
+import { settingModel } from '../../models/setting.model';
+import { IVideoData, IJobData, IStorage, ISourceInfo, ISourceAudioInfo, IEncodeVideoAudioArgs, IEncodingSetting, MediaQueueResult } from './interfaces';
 import { StatusCode } from '../../enums/status-code.enum';
 import { StreamCodec } from '../../enums/stream-codec.enum';
 import { RejectCode } from '../../enums/reject-code.enum';
-import { ProgressCode } from '../../enums/progress-code.enum';
-import { findInFile, appendToFile, fileExists, deleteFolder } from '../../utils/file-helper.util';
-import { createRcloneConfig, downloadFile, deletePath } from '../../utils/rclone.util';
-import { generateSprites } from '../../utils/thumbnail.util';
-import { parseProgress, progressPercent } from '../../utils/ffmpeg-helper.util';
-import { StringCrypto } from '../../utils/string-crypto.util';
-import { createSnowFlakeId } from '../../utils/snowflake-id.util';
-import { divideFromString } from '../../utils/string-helper.util';
+import { TaskQueue } from '../../enums/task-queue.enum';
 import { ENCODING_QUALITY, AUDIO_PARAMS, AUDIO_2ND_PARAMS, VIDEO_H264_PARAMS, VIDEO_VP9_PARAMS, VIDEO_AV1_PARAMS } from '../../config';
 import { RcloneFile } from '../../common/interfaces';
 import { KamplexApiService } from '../../common/modules/kamplex-api';
+import {
+  createRcloneConfig, downloadFile, deletePath, createSnowFlakeId, divideFromString, findInFile, appendToFile, fileExists,
+  deleteFolder, generateSprites, parseProgress, progressPercent, MediaInfoResult, StringCrypto, getMediaInfo, createH264Params
+} from '../../utils';
+
+type JobNameType = 'update-source' | 'add-stream-video' | 'finished-encoding' | 'cancelled-encoding' | 'failed-encoding';
 
 @Injectable()
 export class VideoService {
@@ -37,8 +38,9 @@ export class VideoService {
   private CanceledJobIds: (string | number)[];
   private thumbnailFolder: string;
 
-  constructor(@Inject(WINSTON_MODULE_PROVIDER) private readonly logger: Logger, private configService: ConfigService,
-    private kamplexApiService: KamplexApiService) {
+  constructor(@Inject(WINSTON_MODULE_PROVIDER) private readonly logger: Logger,
+    @InjectQueue(TaskQueue.VIDEO_TRANSCODE_RESULT) private videoResultQueue: Queue<MediaQueueResult, any, JobNameType>,
+    private configService: ConfigService, private kamplexApiService: KamplexApiService) {
     const audioParams = this.configService.get<string>('AUDIO_PARAMS');
     this.AudioParams = audioParams ? audioParams.split(' ') : AUDIO_PARAMS;
     const audio2ndParams = this.configService.get<string>('AUDIO_2ND_PARAMS');
@@ -59,36 +61,43 @@ export class VideoService {
       this.CanceledJobIds = this.CanceledJobIds.filter(id => +id > +job.id);
       this.logger.info(`Received cancel signal from job id: ${job.id}`);
       await this.kamplexApiService.ensureProducerAppIsOnline(job.data.producerUrl);
-      return this.generateStatus(StatusCode.CANCELLED_ENCODING, job.data);
+      await this.videoResultQueue.add('cancelled-encoding', this.generateStatus(job));
+      return {};
     }
 
-    const audioParams = job.data.audioParams != undefined ? job.data.audioParams.split(' ') : this.AudioParams;
-    const audio2ndParams = job.data.audio2Params != undefined ? job.data.audio2Params.split(' ') : this.Audio2ndParams;
-    const videoH264Params = job.data.h264Params != undefined ? job.data.h264Params.split(' ') : this.VideoH264Params;
-    const videoVP9Params = job.data.vp9Params != undefined ? job.data.vp9Params.split(' ') : this.VideoVP9Params;
-    const videoAV1Params = job.data.av1Params != undefined ? job.data.av1Params.split(' ') : this.VideoAV1Params;
-    const qualityList = Array.isArray(job.data.qualityList) && job.data.qualityList.length ? job.data.qualityList : ENCODING_QUALITY;
-    const encodingSettings = job.data.encodingSettings;
+    // Connect to MongoDB
+    await mongoose.connect(this.configService.get<string>('DATABASE_URL'));
+    const appSettings = await settingModel.findOne({}).lean().exec();
+
+    const audioParams = appSettings.streamAudioParams ? appSettings.streamAudioParams.split(' ') : this.AudioParams;
+    const audio2ndParams = appSettings.streamAudio2Params ? appSettings.streamAudio2Params.split(' ') : this.Audio2ndParams;
+    const videoH264Params = appSettings.streamH264Params ? appSettings.streamH264Params.split(' ') : this.VideoH264Params;
+    const videoVP9Params = appSettings.streamVP9Params ? appSettings.streamVP9Params.split(' ') : this.VideoVP9Params;
+    const videoAV1Params = appSettings.streamAV1Params ? appSettings.streamAV1Params.split(' ') : this.VideoAV1Params;
+    const qualityList = Array.isArray(appSettings.streamQualityList) && appSettings.streamQualityList.length ? appSettings.streamQualityList : ENCODING_QUALITY;
+    const encodingSettings = appSettings.streamEncodingSettings || [];
 
     const rcloneConfigFile = this.configService.get<string>('RCLONE_CONFIG_FILE');
     const transcodeDir = `${this.configService.get<string>('TRANSCODE_DIR')}/${job.id}`;
     const ffmpegDir = this.configService.get<string>('FFMPEG_DIR');
+    const mediainfoDir = this.configService.get<string>('MEDIAINFO_DIR');
 
     const configExists = await findInFile(rcloneConfigFile, `[${job.data.storage}]`);
     if (!configExists) {
       this.logger.info(`Config for remote "${job.data.storage}" not found, generating...`);
-      await mongoose.connect(this.configService.get<string>('DATABASE_URL'));
       let externalStorage = await externalStorageModel.findOne({ _id: BigInt(job.data.storage) }).lean().exec();
-      await mongoose.disconnect();
       if (!externalStorage) {
-        const statusJson = await this.generateStatusJson(StatusCode.STORAGE_NOT_FOUND, job.data);
-        throw new Error(statusJson);
+        const statusError = await this.generateStatusError(StatusCode.STORAGE_NOT_FOUND, job);
+        throw new Error(statusError.errorCode);
       }
       externalStorage = await this.decryptToken(externalStorage);
       const newConfig = createRcloneConfig(externalStorage);
       await appendToFile(rcloneConfigFile, newConfig);
       this.logger.info(`Generated config for remote "${job.data.storage}"`);
     }
+
+    // Disconnect MongoDB
+    await mongoose.disconnect();
 
     const inputFile = `${transcodeDir}/${job.data.filename}`;
     const parsedInput = path.parse(inputFile);
@@ -104,53 +113,54 @@ export class VideoService {
     } catch (e) {
       this.logger.error(e);
       await deleteFolder(transcodeDir);
-      const statusJson = await this.generateStatusJson(StatusCode.DOWNLOAD_FAILED, job.data);
-      throw new Error(statusJson);
+      const statusError = await this.generateStatusError(StatusCode.DOWNLOAD_FAILED, job);
+      throw new Error(statusError.errorCode);
     }
     let videoInfo: FFprobe.FFProbeResult;
+    let videoMIInfo: MediaInfoResult;
     this.logger.info(`Processing input file: ${inputFile}`);
     try {
       videoInfo = await FFprobe(inputFile, { path: `${ffmpegDir}/ffprobe` });
+      videoMIInfo = await getMediaInfo(inputFile, `${mediainfoDir}/mediainfo`);
     } catch (e) {
       this.logger.error(e);
       await deleteFolder(transcodeDir);
-      await job.discard();
-      const statusJson = await this.generateStatusJson(StatusCode.PROBE_FAILED, job.data);
-      throw new Error(statusJson);
+      const statusError = await this.generateStatusError(StatusCode.PROBE_FAILED, job, { discard: true });
+      throw new UnrecoverableError(statusError.errorCode);
     }
 
     const videoTrack = videoInfo.streams.find(s => s.codec_type === 'video');
-    if (!videoTrack) {
+    const videoMITrack = videoMIInfo.media.track.find(s => s['@type'] === 'Video');
+    if (!videoTrack || !videoMITrack) {
       this.logger.error('Video track not found');
       await deleteFolder(transcodeDir);
-      await job.discard();
-      const statusJson = await this.generateStatusJson(StatusCode.NO_VIDEO_TRACK, job.data);
-      throw new Error(statusJson);
+      const statusError = await this.generateStatusError(StatusCode.NO_VIDEO_TRACK, job, { discard: true });
+      throw new UnrecoverableError(statusError.errorCode);
     }
 
     const audioTracks = videoInfo.streams.filter(s => s.codec_type === 'audio');
     if (!audioTracks.length) {
       this.logger.error('Audio track not found');
       await deleteFolder(transcodeDir);
-      await job.discard();
-      const statusJson = await this.generateStatusJson(StatusCode.NO_AUDIO_TRACK, job.data);
-      throw new Error(statusJson);
+      const statusError = await this.generateStatusError(StatusCode.NO_AUDIO_TRACK, job, { discard: true });
+      throw new UnrecoverableError(statusError.errorCode);
     }
 
     const runtime = videoInfo.format.duration ? Math.trunc(+videoInfo.format.duration) : 0;
     const videoDuration = videoTrack.duration ? Math.trunc(+videoTrack.duration) : runtime;
-    const videoFps = Math.ceil(divideFromString(videoTrack.r_frame_rate));
+    const videoFps = Math.ceil(+videoMITrack.FrameRate) || Math.ceil(divideFromString(videoTrack.r_frame_rate));
     const videoBitrate = videoTrack.bit_rate ? Math.round(+videoTrack.bit_rate / 1000) :
-      videoInfo.format.bit_rate ? Math.round(+videoInfo.format.bit_rate / 1000) : 0; // Bitrate in Kbps
+      videoMITrack.BitRate ? Math.round(+videoMITrack.BitRate / 1000) : 0; // Bitrate in Kbps
     const videoCodec = videoTrack.codec_name || '';
+    const videoSourceH264Params = (videoCodec === 'h264' && videoMITrack.Encoded_Library_Settings) ?
+      createH264Params(videoMITrack.Encoded_Library_Settings) : '';
 
     const allQualityList = this.calculateQuality(videoTrack.height, qualityList);
     this.logger.info(`All quality: ${allQualityList.length ? allQualityList.join(', ') : 'None'}`);
     if (!allQualityList.length) {
       await deleteFolder(transcodeDir);
-      await job.discard();
-      const statusJson = await this.generateStatusJson(StatusCode.LOW_QUALITY_VIDEO, job.data);
-      throw new Error(statusJson);
+      const statusError = await this.generateStatusError(StatusCode.LOW_QUALITY_VIDEO, job, { discard: true });
+      throw new UnrecoverableError(statusError.errorCode);
     }
 
     // Check already encoded files
@@ -162,10 +172,9 @@ export class VideoService {
     if (!availableQualityList.length) {
       this.logger.info('Everything is already encoded, no need to continue');
       await deleteFolder(transcodeDir);
-      await job.discard();
-      // generateStatus here, not generateStatusJson
       await this.kamplexApiService.ensureProducerAppIsOnline(job.data.producerUrl);
-      return this.generateStatus(StatusCode.CANCELLED_ENCODING, job.data);
+      await this.videoResultQueue.add('cancelled-encoding', this.generateStatus(job));
+      return {};
     }
 
     const srcWidth = videoTrack.width || 0;
@@ -174,15 +183,14 @@ export class VideoService {
     this.logger.info(`Video resolution: ${srcWidth}x${srcHeight}`);
 
     await this.kamplexApiService.ensureProducerAppIsOnline(job.data.producerUrl);
-
-    await job.progress({
-      code: ProgressCode.UPDATE_SOURCE,
-      sourceId: job.data._id,
-      quality: srcHeight,
-      runtime: runtime,
-      media: job.data.media,
-      episode: job.data.episode,
-      storage: job.data.storage
+    await this.videoResultQueue.add('update-source', {
+      ...job.data,
+      jobId: job.id,
+      progress: {
+        sourceId: job.data._id,
+        quality: srcHeight,
+        runtime: runtime
+      }
     });
 
     this.logger.info('Processing audio');
@@ -204,10 +212,11 @@ export class VideoService {
       await deleteFolder(transcodeDir);
       if (e === RejectCode.JOB_CANCEL) {
         this.logger.info(`Received cancel signal from job id: ${job.id}`);
-        return this.generateStatus(StatusCode.CANCELLED_ENCODING, job.data);
+        await this.videoResultQueue.add('cancelled-encoding', this.generateStatus(job));
+        return {};
       }
-      const statusJson = await this.generateStatusJson(StatusCode.ENCODE_AUDIO_FAILED, job.data);
-      throw new Error(statusJson);
+      const statusError = await this.generateStatusError(StatusCode.ENCODE_AUDIO_FAILED, job);
+      throw new Error(statusError.errorCode);
     }
     audioInputForVideo.push('-i', `"${parsedInput.dir}/${parsedInput.name}_audio_${firstAudioTrack.index}.mp4"`);
     audioMapForVideo.push('-map', '1:a:0');
@@ -223,10 +232,11 @@ export class VideoService {
         await deleteFolder(transcodeDir);
         if (e === RejectCode.JOB_CANCEL) {
           this.logger.info(`Received cancel signal from job id: ${job.id}`);
-          return this.generateStatus(StatusCode.CANCELLED_ENCODING, job.data);
+          await this.videoResultQueue.add('cancelled-encoding', this.generateStatus(job));
+          return {};
         }
-        const statusJson = await this.generateStatusJson(StatusCode.ENCODE_AUDIO_FAILED, job.data);
-        throw new Error(statusJson);
+        const statusError = await this.generateStatusError(StatusCode.ENCODE_AUDIO_FAILED, job);
+        throw new Error(statusError.errorCode);
       }
       audioInputForVideo.push('-i', `"${parsedInput.dir}/${parsedInput.name}_audio_${secondAudioTrack.index}.mp4"`);
       audioMapForVideo.push('-map', '2:a:0');
@@ -235,7 +245,10 @@ export class VideoService {
     const encodeVideoAudioArgs: IEncodeVideoAudioArgs = { inputs: audioInputForVideo, maps: audioMapForVideo };
 
     try {
-      const sourceInfo: ISourceInfo = { videoDuration, videoFps, videoBitrate, videoCodec };
+      const sourceInfo: ISourceInfo = {
+        videoDuration, videoFps, videoBitrate, videoCodec, videoSourceH264Params,
+        videoQuality: srcHeight
+      };
       if (codec === StreamCodec.H264_AAC) {
         this.logger.info('Video codec: H264');
         await this.encodeByCodec(inputFile, parsedInput, encodeVideoAudioArgs, sourceInfo,
@@ -287,24 +300,24 @@ export class VideoService {
         listAttempt++;
       }
       this.logger.info(`${uploadedFiles.length}/${totalExpectedFiles} files uploaded`);
-      await job.discard();
     } catch (e) {
       this.logger.error(JSON.stringify(e));
       if (e === RejectCode.JOB_CANCEL) {
         this.logger.info(`Received cancel signal from job id: ${job.id}`);
-        await job.discard();
         await this.kamplexApiService.ensureProducerAppIsOnline(job.data.producerUrl);
-        return this.generateStatus(StatusCode.CANCELLED_ENCODING, job.data);
+        await this.videoResultQueue.add('cancelled-encoding', this.generateStatus(job));
+        return {};
       }
-      const statusJson = await this.generateStatusJson(StatusCode.ENCODE_VIDEO_FAILED, job.data);
-      throw new Error(statusJson);
+      const statusError = await this.generateStatusError(StatusCode.ENCODE_VIDEO_FAILED, job);
+      throw new Error(statusError.errorCode);
     } finally {
       this.logger.info('Cleaning up');
       await deleteFolder(transcodeDir);
       this.logger.info('Completed');
     }
     await this.kamplexApiService.ensureProducerAppIsOnline(job.data.producerUrl);
-    return this.generateStatus(StatusCode.FINISHED_ENCODING, job.data);
+    await this.videoResultQueue.add('finished-encoding', this.generateStatus(job));
+    return {};
   }
 
   addToCanceled(job: Job<IJobData>) {
@@ -332,7 +345,7 @@ export class VideoService {
       const perQualitySettings = encodingSettings.find(s => s.quality === qualityList[i]);
       try {
         if (codec === StreamCodec.H264_AAC) {
-          const videoArgs = this.createVideoEncodingArgs(inputFile, parsedInput, audioArgs, qualityList[i], videoParams,
+          const videoArgs = this.createVideoEncodingArgs(inputFile, parsedInput, audioArgs, codec, qualityList[i], videoParams,
             sourceInfo, 'crf', perQualitySettings);
           const rcloneMoveArgs = this.createRcloneMoveArgs(`${parsedInput.dir}/${parsedInput.name}_${qualityList[i]}.mp4`,
             `${job.data.storage}:${job.data._id}/${streamId}`);
@@ -340,11 +353,11 @@ export class VideoService {
           await this.uploadMedia(rcloneMoveArgs, job.id);
         } else {
           // Pass 1 params
-          const videoPass1Args = this.createTwoPassesVideoEncodingArgs(inputFile, parsedInput, audioArgs, qualityList[i], videoParams,
-            sourceInfo, 'cq', 1, perQualitySettings);
+          const videoPass1Args = this.createTwoPassesVideoEncodingArgs(inputFile, parsedInput, audioArgs, codec, qualityList[i],
+            videoParams, sourceInfo, 'cq', 1, perQualitySettings);
           // Pass 2 params
-          const videoPass2Args = this.createTwoPassesVideoEncodingArgs(inputFile, parsedInput, audioArgs, qualityList[i], videoParams,
-            sourceInfo, 'cq', 2, perQualitySettings);
+          const videoPass2Args = this.createTwoPassesVideoEncodingArgs(inputFile, parsedInput, audioArgs, codec, qualityList[i],
+            videoParams, sourceInfo, 'cq', 2, perQualitySettings);
           const rcloneMoveArgs = this.createRcloneMoveArgs(`${parsedInput.dir}/${parsedInput.name}_${qualityList[i]}.mp4`,
             `${job.data.storage}:${job.data._id}/${streamId}`);
           await this.encodeMedia(videoPass1Args, videoDuration, job.id);
@@ -367,17 +380,16 @@ export class VideoService {
       }
 
       await this.kamplexApiService.ensureProducerAppIsOnline(job.data.producerUrl);
-
-      await job.progress({
-        code: ProgressCode.ADD_STREAM_VIDEO,
-        sourceId: job.data._id,
-        streamId: streamId,
-        fileName: `${parsedInput.name}_${qualityList[i]}.mp4`,
-        codec: codec,
-        quality: qualityList[i],
-        media: job.data.media,
-        episode: job.data.episode,
-        storage: job.data.storage
+      await this.videoResultQueue.add('add-stream-video', {
+        ...job.data,
+        jobId: job.id,
+        progress: {
+          sourceId: job.data._id,
+          streamId: streamId,
+          fileName: `${parsedInput.name}_${qualityList[i]}.mp4`,
+          codec: codec,
+          quality: qualityList[i],
+        }
       });
     }
   }
@@ -397,7 +409,8 @@ export class VideoService {
   }
 
   private createVideoEncodingArgs(inputFile: string, parsedInput: path.ParsedPath, audioArgs: IEncodeVideoAudioArgs,
-    quality: number, videoParams: string[], sourceInfo: ISourceInfo, crfKey: 'crf' | 'cq', encodingSetting?: IEncodingSetting) {
+    codec: number, quality: number, videoParams: string[], sourceInfo: ISourceInfo, crfKey: 'crf' | 'cq',
+    encodingSetting?: IEncodingSetting) {
     const gopSize = (sourceInfo.videoFps ? sourceInfo.videoFps * 2 : 48).toString();
     const args: string[] = [
       '-hide_banner', '-y',
@@ -411,6 +424,8 @@ export class VideoService {
     ];
     if (encodingSetting)
       this.resolveEncodingSettings(args, encodingSetting, sourceInfo, crfKey);
+    if (codec === StreamCodec.H264_AAC && sourceInfo.videoQuality === quality && sourceInfo.videoSourceH264Params)
+      args.push('-x264-params', sourceInfo.videoSourceH264Params);
     args.push(
       '-map', '0:v:0',
       ...audioArgs.maps,
@@ -423,7 +438,7 @@ export class VideoService {
   }
 
   private createTwoPassesVideoEncodingArgs(inputFile: string, parsedInput: path.ParsedPath, audioArgs: IEncodeVideoAudioArgs,
-    quality: number, videoParams: string[], sourceInfo: ISourceInfo, crfKey: 'crf' | 'cq', pass: number = 1,
+    codec: number, quality: number, videoParams: string[], sourceInfo: ISourceInfo, crfKey: 'crf' | 'cq', pass: number = 1,
     encodingSetting?: IEncodingSetting) {
     const gopSize = (sourceInfo.videoFps ? sourceInfo.videoFps * 2 : 48).toString();
     if (pass === 1) {
@@ -439,6 +454,8 @@ export class VideoService {
       ];
       if (encodingSetting)
         this.resolveEncodingSettings(args, encodingSetting, sourceInfo, crfKey);
+      if (codec === StreamCodec.H264_AAC && sourceInfo.videoQuality === quality && sourceInfo.videoSourceH264Params)
+        args.push('-x264-params', sourceInfo.videoSourceH264Params);
       args.push(
         '-map', '0:v:0',
         '-map_metadata', '-1',
@@ -462,6 +479,8 @@ export class VideoService {
     ];
     if (encodingSetting)
       this.resolveEncodingSettings(args, encodingSetting, sourceInfo, crfKey);
+    if (codec === StreamCodec.H264_AAC && sourceInfo.videoQuality === quality && sourceInfo.videoSourceH264Params)
+      args.push('-x264-params', sourceInfo.videoSourceH264Params);
     args.push(
       '-map', '0:v:0',
       ...audioArgs.maps,
@@ -477,7 +496,8 @@ export class VideoService {
 
   private resolveEncodingSettings(args: string[], encodingSetting: IEncodingSetting, sourceInfo: ISourceInfo,
     crfKey: 'crf' | 'cq' = 'crf') {
-    encodingSetting[crfKey] && args.push('-crf', encodingSetting[crfKey].toString());
+    const crfValue = crfKey === 'crf' ? encodingSetting.crf : encodingSetting.cq;
+    crfValue && args.push('-crf', crfValue.toString());
     // Should double the bitrate when the source codec isn't h264 (could be h265, vp9 or av1)
     const baseBitrate = sourceInfo.videoCodec === 'h264' ? sourceInfo.videoBitrate : sourceInfo.videoBitrate * 2;
     if (encodingSetting.useLowerRate && baseBitrate > 0 && baseBitrate < encodingSetting.maxrate) {
@@ -725,18 +745,19 @@ export class VideoService {
     return storage;
   }
 
-  private async generateStatusJson(code: string, jobData: IVideoData) {
-    const status = this.generateStatus(code, jobData);
+  private async generateStatusError(errorCode: string, job: Job<IVideoData>, options: { discard: boolean } = { discard: false }) {
+    const status = { errorCode, jobId: job.id, ...job.data };
     const statusJson = JSON.stringify(status);
-    this.logger.error(`Error: ${code} - ${statusJson}`);
-    await this.kamplexApiService.ensureProducerAppIsOnline(jobData.producerUrl);
-    return statusJson;
+    this.logger.error(`Error: ${errorCode} - ${statusJson}`);
+    await this.kamplexApiService.ensureProducerAppIsOnline(job.data.producerUrl);
+    if (options.discard)
+      job.discard();
+    if (options.discard || job.attemptsMade >= job.opts.attempts)
+      await this.videoResultQueue.add('failed-encoding', status);
+    return status;
   }
 
-  private generateStatus(code: string, jobData: IVideoData) {
-    return {
-      code: code,
-      ...jobData
-    }
+  private generateStatus(job: Job<IVideoData>) {
+    return { jobId: job.id, ...job.data };
   }
 }

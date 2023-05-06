@@ -3,4 +3,6 @@ export interface ISourceInfo {
   videoDuration: number;
   videoFps: number;
   videoBitrate: number;
+  videoQuality: number;
+  videoSourceH264Params: string;
 }

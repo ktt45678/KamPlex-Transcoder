@@ -1,7 +1,8 @@
 import { Module } from '@nestjs/common';
 import { ConfigModule, ConfigService } from '@nestjs/config';
-import { BullModule } from '@nestjs/bull';
+import { BullModule } from '@nestjs/bullmq';
 import { utilities as nestWinstonModuleUtilities, WinstonModule } from 'nest-winston';
+import { parseRedisUrl } from 'parse-redis-url-simple';
 import * as winston from 'winston';
 import 'winston-daily-rotate-file';
 
@@ -18,9 +19,17 @@ import { VideoCancelModule } from './resources/video-cancel/video-cancel.module'
     }),
     BullModule.forRootAsync({
       imports: [ConfigModule],
-      useFactory: async (configService: ConfigService) => ({
-        url: configService.get<string>('REDIS_QUEUE_URL')
-      }),
+      useFactory: async (configService: ConfigService) => {
+        const [parsedUrl] = parseRedisUrl(configService.get<string>('REDIS_QUEUE_URL'));
+        return {
+          connection: {
+            host: parsedUrl.host,
+            port: parsedUrl.port,
+            password: parsedUrl.password,
+            db: +parsedUrl.database
+          }
+        };
+      },
       inject: [ConfigService],
     }),
     WinstonModule.forRoot({

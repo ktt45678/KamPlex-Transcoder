@@ -57,7 +57,7 @@ export async function generateSprites(options: GeneratorOptions): Promise<Genera
   const tw = options.tw || 160;
   const th = options.th || 90;
 
-  const toWebp = options.toWebp || false;
+  //const toWebp = options.toWebp || false;
 
   const outputPath = options.output;
   const tempPath = path.join(options.output, 'generated');
@@ -80,8 +80,8 @@ export async function generateSprites(options: GeneratorOptions): Promise<Genera
 
   predicted = frameCount;
 
-  let pageCols = 8;
-  let pageRows = 8;
+  let pageCols = 10;
+  let pageRows = 10;
 
   if (predicted < pageCols) pageCols = predicted;
 
@@ -130,13 +130,13 @@ export async function generateSprites(options: GeneratorOptions): Promise<Genera
     for (let i = 0; i < remainder; i++) {
       let offset = pageTotal * pageID;
       const frameNumber = offset + i + 1;
-      let imagePath = path.join(tempPath, `thumb_${frameNumber}.jpg`);
+      let imagePath = path.join(tempPath, `thumb_${frameNumber}.png`);
       //console.log(`Loading ${imagePath}`);
 
       let dx = Math.floor((i % pageCols) * tw);
       let dy = Math.floor(i / pageCols) * th;
 
-      //console.log(`Drawing thumb_${frameNumber}.jpg at ${dx}x${dy}`);
+      //console.log(`Drawing thumb_${frameNumber}.png at ${dx}x${dy}`);
 
       overlayThumbs.push({ input: imagePath, top: dy, left: dx });
 
@@ -183,7 +183,7 @@ function generateThumbnails(inputFile: string, outputFolder: string, tw: number,
       '-qmin', '1',
       '-qscale:v', '1',
       '-f', 'image2',
-      `"${outputFolder}/thumb_%d.jpg"`
+      `"${outputFolder}/thumb_%d.png"`
     ];
 
     let generatedFrames = 0;

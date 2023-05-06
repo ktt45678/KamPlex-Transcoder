@@ -1,5 +1,5 @@
 import { Module } from '@nestjs/common';
-import { BullModule } from '@nestjs/bull';
+import { BullModule } from '@nestjs/bullmq';
 
 import { VideoService } from './video.service';
 import { VideoCosumer } from './video.consumer';
@@ -12,7 +12,15 @@ import { KamplexApiModule } from '../../common/modules/kamplex-api';
       name: TaskQueue.VIDEO_TRANSCODE,
       defaultJobOptions: {
         removeOnComplete: true,
-        removeOnFail: true
+        removeOnFail: true,
+        attempts: 3
+      }
+    }, {
+      name: TaskQueue.VIDEO_TRANSCODE_RESULT,
+      defaultJobOptions: {
+        removeOnComplete: true,
+        removeOnFail: true,
+        attempts: 3
       }
     }),
     KamplexApiModule

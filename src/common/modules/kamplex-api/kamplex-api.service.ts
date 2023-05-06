@@ -13,10 +13,12 @@ export class KamplexApiService {
   constructor(@Inject(WINSTON_MODULE_PROVIDER) private readonly logger: Logger, private httpService: HttpService,
     private configService: ConfigService) { }
 
-  async ensureProducerAppIsOnline(url: string, retries: number = 25, retryTimeout: number = 30000) {
+  async ensureProducerAppIsOnline(url: string, retries: number = 10, retryTimeout: number = 30000) {
     this.logger.info(`Pinging producer: ${url}`);
     let totalRetries = 0;
     while (totalRetries < retries) {
+      if (totalRetries > 0)
+        this.logger.info(`Retrying ${totalRetries / retries}`);
       const bypassCheckFileExist = await fileExists(BYPASS_PRODUCER_CHECK_FILE);
       if (bypassCheckFileExist) {
         this.logger.info('Bypass producer check file detected, skipping...');
@@ -24,8 +26,9 @@ export class KamplexApiService {
       }
       const isValidUrl = await this.isValidApiUrl(url);
       if (!isValidUrl) {
+        this.logger.warn(`Invalid producer url detected, retrying in ${retryTimeout}ms`);
+        await new Promise(r => setTimeout(r, retryTimeout));
         totalRetries++;
-        this.logger.warning(`Invalid producer url detected, retrying in ${retryTimeout}ms, retry: ${totalRetries}/${retries}`);
         continue;
       }
       try {
@@ -35,6 +38,7 @@ export class KamplexApiService {
         this.logger.info(`GET ${url}: ${response.status}`);
         return true;
       } catch (e) {
+        totalRetries++;
         if (e.isAxiosError) {
           this.logger.error(`Failed to validate online status of the producer app, retrying in ${retryTimeout}ms`);
           await new Promise(r => setTimeout(r, retryTimeout));
@@ -44,7 +48,6 @@ export class KamplexApiService {
         }
       }
     }
-    return false;
   }
 
   private async isValidApiUrl(url: string) {

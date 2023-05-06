@@ -1,6 +1,6 @@
 import { Inject } from '@nestjs/common';
-import { OnQueueActive, Process, Processor } from '@nestjs/bull';
-import { Job } from 'bull';
+import { OnWorkerEvent, Processor, WorkerHost } from '@nestjs/bullmq';
+import { Job } from 'bullmq';
 import { WINSTON_MODULE_PROVIDER } from 'nest-winston';
 import { Logger } from 'winston';
 
@@ -8,18 +8,19 @@ import { TaskQueue } from '../../enums/task-queue.enum';
 import { IJobData } from '../video/interfaces/job-data.interface';
 import { VideoService } from '../video/video.service';
 
-@Processor(TaskQueue.VIDEO_CANCEL)
-export class VideoCancelConsumer {
-  constructor(@Inject(WINSTON_MODULE_PROVIDER) private readonly logger: Logger, private readonly videoService: VideoService) { }
+@Processor(TaskQueue.VIDEO_CANCEL, { concurrency: 1 })
+export class VideoCancelConsumer extends WorkerHost {
+  constructor(@Inject(WINSTON_MODULE_PROVIDER) private readonly logger: Logger, private readonly videoService: VideoService) {
+    super();
+  }
 
-  @Process({ name: 'cancel', concurrency: 1 })
-  async cancelRunningJob(job: Job<IJobData>) {
+  async process(job: Job<IJobData>) {
     this.videoService.addToCanceled(job);
-    await job.discard();
+    job.discard();
     return { cancel: true };
   }
 
-  @OnQueueActive()
+  @OnWorkerEvent('active')
   onActive(job: Job) {
     this.logger.info(`Processing job ${job.id} of type ${job.name}`);
   }
