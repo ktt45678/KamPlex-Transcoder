@@ -53,6 +53,12 @@ export async function fileExists(filePath: string) {
   }
 }
 
+export async function renameFile(filePath: string, newPath: string) {
+  const isFileExists = await fileExists(filePath);
+  if (isFileExists)
+    await fs.promises.rename(filePath, newPath);
+}
+
 export async function deleteFile(filePath: string) {
   const isFileExists = await fileExists(filePath);
   if (isFileExists)

@@ -7,13 +7,13 @@ const KNWON_ENCODING_SETTINGS = ['cabac', 'ref', 'deblock', 'analyse', 'me', 'su
   'qcomp', 'qpmin', 'qpmax', 'qpstep', 'nal_hrd', 'filler', 'ip_ratio', 'aq'
 ];
 
-export function getMediaInfo(input: string, mediainfoPath: string) {
+export function getMediaInfo(input: string, mediainfoDir: string) {
   const args: string[] = [
     `"${input}"`,
     '--output=JSON'
   ];
   return new Promise<MediaInfoResult>((resolve, reject) => {
-    const mediainfo = child_process.spawn(mediainfoPath, args, { shell: true });
+    const mediainfo = child_process.spawn(`"${mediainfoDir}/mediainfo"`, args, { shell: true });
     let infoJson = '';
     let errorMessage = '';
     mediainfo.stdout.setEncoding('utf8');

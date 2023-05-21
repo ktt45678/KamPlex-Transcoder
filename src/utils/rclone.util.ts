@@ -41,7 +41,7 @@ export function downloadFile(configPath: string, rcloneDir: string, remote: stri
   logFn(args);
   //console.log('\x1b[36m%s\x1b[0m', 'rclone ' + args.join(' '));
   return new Promise<void>((resolve, reject) => {
-    const rclone = child_process.spawn(`${rcloneDir}/rclone`, args, { shell: true });
+    const rclone = child_process.spawn(`"${rcloneDir}/rclone"`, args, { shell: true });
     let errorMessage = '';
     rclone.stderr.setEncoding('utf8');
     rclone.stderr.on('data', (data) => {
@@ -67,7 +67,7 @@ export async function deletePath(configPath: string, rcloneDir: string, remote: 
   if (!pathExist) return;
   //console.log('\x1b[36m%s\x1b[0m', 'rclone ' + args.join(' '));
   return new Promise<void>((resolve, reject) => {
-    const rclone = child_process.spawn(`${rcloneDir}/rclone`, args, { shell: true });
+    const rclone = child_process.spawn(`"${rcloneDir}/rclone"`, args, { shell: true });
     let errorMessage = '';
     rclone.stderr.setEncoding('utf8');
     rclone.stderr.on('data', (data) => {
@@ -92,7 +92,7 @@ export function deleteRemote(configPath: string, rcloneDir: string, remote: stri
   logFn(args);
   //console.log('\x1b[36m%s\x1b[0m', 'rclone ' + args.join(' '));
   return new Promise<void>((resolve, reject) => {
-    const rclone = child_process.spawn(`${rcloneDir}/rclone`, args, { shell: true });
+    const rclone = child_process.spawn(`"${rcloneDir}/rclone"`, args, { shell: true });
     let errorMessage = '';
     rclone.stderr.setEncoding('utf8');
     rclone.stderr.on('data', (data) => {
@@ -118,7 +118,7 @@ export function listJson(configPath: string, rcloneDir: string, remote: string, 
   }
   //console.log('\x1b[36m%s\x1b[0m', 'rclone ' + args.join(' '));
   return new Promise<RcloneFile[]>((resolve, reject) => {
-    const rclone = child_process.spawn(`${rcloneDir}/rclone`, args, { shell: true });
+    const rclone = child_process.spawn(`"${rcloneDir}/rclone"`, args, { shell: true });
     let listJson = '';
     let errorMessage = '';
     rclone.stdout.setEncoding('utf8');
@@ -149,7 +149,7 @@ export function isPathExist(configPath: string, rcloneDir: string, remote: strin
   ];
   //console.log('\x1b[36m%s\x1b[0m', 'rclone ' + args.join(' '));
   return new Promise<boolean>((resolve) => {
-    const rclone = child_process.spawn(`${rcloneDir}/rclone`, args, { shell: true });
+    const rclone = child_process.spawn(`"${rcloneDir}/rclone"`, args, { shell: true });
     rclone.on('exit', (code: number) => {
       if (code !== 0) {
         resolve(false);

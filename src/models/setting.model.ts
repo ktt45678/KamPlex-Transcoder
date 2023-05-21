@@ -2,14 +2,16 @@ import { Schema, model } from 'mongoose';
 
 interface ISetting {
   _id: bigint;
-  defaultStreamCodecs: number;
-  streamAudioParams: string;
-  streamAudio2Params: string;
-  streamH264Params: string;
-  streamVP9Params: string;
-  streamAV1Params: string;
-  streamQualityList: number[];
-  streamEncodingSettings: IEncodingSetting[];
+  defaultVideoCodecs: number;
+  audioParams: string;
+  audioSpeedParams: string;
+  audioSurroundParams: string;
+  audioSurroundOpusParams: string;
+  videoH264Params: string;
+  videoVP9Params: string;
+  videoAV1Params: string;
+  videoQualityList: number[];
+  videoEncodingSettings: IEncodingSetting[];
 }
 
 interface IEncodingSetting {
@@ -32,14 +34,15 @@ const encodingSettingSchema = new Schema<IEncodingSetting>({
 
 const settingSchema = new Schema<ISetting>({
   _id: { type: Schema.Types.Mixed, required: true },
-  defaultStreamCodecs: { type: Number },
-  streamAudioParams: { type: String },
-  streamAudio2Params: { type: String },
-  streamH264Params: { type: String },
-  streamVP9Params: { type: String },
-  streamAV1Params: { type: String },
-  streamQualityList: { type: [Number] },
-  streamEncodingSettings: { type: [encodingSettingSchema] }
+  defaultVideoCodecs: { type: Number },
+  audioParams: { type: String },
+  audioSurroundParams: { type: String },
+  audioSurroundOpusParams: { type: String },
+  videoH264Params: { type: String },
+  videoVP9Params: { type: String },
+  videoAV1Params: { type: String },
+  videoQualityList: { type: [Number] },
+  videoEncodingSettings: { type: [encodingSettingSchema] }
 });
 
 export const settingModel = model<ISetting>('setting', settingSchema);

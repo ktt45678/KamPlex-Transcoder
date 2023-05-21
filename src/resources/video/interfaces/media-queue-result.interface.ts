@@ -39,5 +39,7 @@ export interface MediaQueueProgress {
 
   runtime: number;
 
-  quality: number;
+  quality?: number;
+
+  channels?: number;
 }

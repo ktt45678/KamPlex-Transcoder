@@ -188,7 +188,7 @@ function generateThumbnails(inputFile: string, outputFolder: string, tw: number,
 
     let generatedFrames = 0;
 
-    const ffmpeg = child_process.spawn(`${options.ffmpegDir}/ffmpeg`, args, { shell: true });
+    const ffmpeg = child_process.spawn(`"${options.ffmpegDir}/ffmpeg"`, args, { shell: true });
 
     ffmpeg.stdout.setEncoding('utf8');
     ffmpeg.stdout.on('data', async (data: string) => {

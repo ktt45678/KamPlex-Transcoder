@@ -13,25 +13,26 @@ import { Logger } from 'winston';
 import { externalStorageModel } from '../../models/external-storage.model';
 import { mediaStorageModel } from '../../models/media-storage.model';
 import { settingModel } from '../../models/setting.model';
-import { IVideoData, IJobData, IStorage, ISourceInfo, ISourceAudioInfo, IEncodeVideoAudioArgs, IEncodingSetting, MediaQueueResult } from './interfaces';
-import { StatusCode } from '../../enums/status-code.enum';
-import { StreamCodec } from '../../enums/stream-codec.enum';
-import { RejectCode } from '../../enums/reject-code.enum';
-import { TaskQueue } from '../../enums/task-queue.enum';
-import { ENCODING_QUALITY, AUDIO_PARAMS, AUDIO_2ND_PARAMS, VIDEO_H264_PARAMS, VIDEO_VP9_PARAMS, VIDEO_AV1_PARAMS } from '../../config';
+import { IVideoData, IJobData, IStorage, ISourceInfo, ISourceAudioInfo, IEncodingSetting, MediaQueueResult } from './interfaces';
+import { AudioCodec, StatusCode, VideoCodec, RejectCode, TaskQueue } from '../../enums';
+import { ENCODING_QUALITY, AUDIO_PARAMS, AUDIO_SURROUND_PARAMS, VIDEO_H264_PARAMS, VIDEO_VP9_PARAMS, VIDEO_AV1_PARAMS, AUDIO_SPEED_PARAMS, AUDIO_SURROUND_OPUS_PARAMS } from '../../config';
 import { RcloneFile } from '../../common/interfaces';
 import { KamplexApiService } from '../../common/modules/kamplex-api';
 import {
-  createRcloneConfig, downloadFile, deletePath, createSnowFlakeId, divideFromString, findInFile, appendToFile, fileExists,
-  deleteFolder, generateSprites, parseProgress, progressPercent, MediaInfoResult, StringCrypto, getMediaInfo, createH264Params
+  createRcloneConfig, downloadFile, renameFile, deleteFile, deletePath, createSnowFlakeId, divideFromString, findInFile,
+  appendToFile, fileExists, deleteFolder, generateSprites, parseProgress, progressPercent, MediaInfoResult, StringCrypto,
+  getMediaInfo, createH264Params, StreamManifest, hasFreeSpaceToCopyFile
 } from '../../utils';
 
-type JobNameType = 'update-source' | 'add-stream-video' | 'finished-encoding' | 'cancelled-encoding' | 'failed-encoding';
+type JobNameType = 'update-source' | 'add-stream-video' | 'add-stream-audio' | 'add-stream-manifest' | 'finished-encoding' |
+  'cancelled-encoding' | 'failed-encoding';
 
 @Injectable()
 export class VideoService {
   private AudioParams: string[];
-  private Audio2ndParams: string[];
+  private AudioSpeedParams: string[];
+  private AudioSurroundParams: string[];
+  private AudioSurroundOpusParams: string[];
   private VideoH264Params: string[];
   private VideoVP9Params: string[];
   private VideoAV1Params: string[];
@@ -43,8 +44,12 @@ export class VideoService {
     private configService: ConfigService, private kamplexApiService: KamplexApiService) {
     const audioParams = this.configService.get<string>('AUDIO_PARAMS');
     this.AudioParams = audioParams ? audioParams.split(' ') : AUDIO_PARAMS;
-    const audio2ndParams = this.configService.get<string>('AUDIO_2ND_PARAMS');
-    this.Audio2ndParams = audio2ndParams ? audio2ndParams.split(' ') : AUDIO_2ND_PARAMS;
+    const audioSpeedParams = this.configService.get<string>('AUDIO_SPEED_PARAMS');
+    this.AudioSpeedParams = audioSpeedParams ? audioSpeedParams.split(' ') : AUDIO_SPEED_PARAMS;
+    const audioSurroundParams = this.configService.get<string>('AUDIO_SURROUND_PARAMS');
+    this.AudioSurroundParams = audioSurroundParams ? audioSurroundParams.split(' ') : AUDIO_SURROUND_PARAMS;
+    const audioSurroundOpusParams = this.configService.get<string>('AUDIO_SURROUND_OPUS_PARAMS');
+    this.AudioSurroundOpusParams = audioSurroundOpusParams ? audioSurroundOpusParams.split(' ') : AUDIO_SURROUND_OPUS_PARAMS;
     const videoH264Params = this.configService.get<string>('VIDEO_H264_PARAMS');
     this.VideoH264Params = videoH264Params ? videoH264Params.split(' ') : VIDEO_H264_PARAMS;
     const videoVP9Params = this.configService.get<string>('VIDEO_VP9_PARAMS');
@@ -69,14 +74,17 @@ export class VideoService {
     await mongoose.connect(this.configService.get<string>('DATABASE_URL'));
     const appSettings = await settingModel.findOne({}).lean().exec();
 
-    const audioParams = appSettings.streamAudioParams ? appSettings.streamAudioParams.split(' ') : this.AudioParams;
-    const audio2ndParams = appSettings.streamAudio2Params ? appSettings.streamAudio2Params.split(' ') : this.Audio2ndParams;
-    const videoH264Params = appSettings.streamH264Params ? appSettings.streamH264Params.split(' ') : this.VideoH264Params;
-    const videoVP9Params = appSettings.streamVP9Params ? appSettings.streamVP9Params.split(' ') : this.VideoVP9Params;
-    const videoAV1Params = appSettings.streamAV1Params ? appSettings.streamAV1Params.split(' ') : this.VideoAV1Params;
-    const qualityList = Array.isArray(appSettings.streamQualityList) && appSettings.streamQualityList.length ? appSettings.streamQualityList : ENCODING_QUALITY;
-    const encodingSettings = appSettings.streamEncodingSettings || [];
+    const audioParams = appSettings.audioParams ? appSettings.audioParams.split(' ') : this.AudioParams;
+    const audioSpeedParams = appSettings.audioSpeedParams ? appSettings.audioSpeedParams.split(' ') : this.AudioSpeedParams;
+    const audioSurroundParams = appSettings.audioSurroundParams ? appSettings.audioSurroundParams.split(' ') : this.AudioSurroundParams;
+    const audioSurroundOpusParams = appSettings.audioSurroundOpusParams ? appSettings.audioSurroundOpusParams.split(' ') : this.AudioSurroundOpusParams;
+    const videoH264Params = appSettings.videoH264Params ? appSettings.videoH264Params.split(' ') : this.VideoH264Params;
+    const videoVP9Params = appSettings.videoVP9Params ? appSettings.videoVP9Params.split(' ') : this.VideoVP9Params;
+    const videoAV1Params = appSettings.videoAV1Params ? appSettings.videoAV1Params.split(' ') : this.VideoAV1Params;
+    const qualityList = Array.isArray(appSettings.videoQualityList) && appSettings.videoQualityList.length ? appSettings.videoQualityList : ENCODING_QUALITY;
+    const encodingSettings = appSettings.videoEncodingSettings || [];
 
+    const rcloneDir = this.configService.get<string>('RCLONE_DIR');
     const rcloneConfigFile = this.configService.get<string>('RCLONE_CONFIG_FILE');
     const transcodeDir = `${this.configService.get<string>('TRANSCODE_DIR')}/${job.id}`;
     const ffmpegDir = this.configService.get<string>('FFMPEG_DIR');
@@ -103,11 +111,9 @@ export class VideoService {
     const parsedInput = path.parse(inputFile);
     this.logger.info(`Downloading file from media id: ${job.data._id}`);
     try {
-      const rcloneDir = this.configService.get<string>('RCLONE_DIR');
-      const rcloneConfig = this.configService.get<string>('RCLONE_CONFIG_FILE');
       const isFileExists = await fileExists(inputFile);
       if (!isFileExists)
-        await downloadFile(rcloneConfig, rcloneDir, job.data.storage, job.data._id, job.data.filename, transcodeDir, (args => {
+        await downloadFile(rcloneConfigFile, rcloneDir, job.data.storage, job.data._id, job.data.filename, transcodeDir, (args => {
           this.logger.info('rclone ' + args.join(' '));
         }));
     } catch (e) {
@@ -121,7 +127,7 @@ export class VideoService {
     this.logger.info(`Processing input file: ${inputFile}`);
     try {
       videoInfo = await FFprobe(inputFile, { path: `${ffmpegDir}/ffprobe` });
-      videoMIInfo = await getMediaInfo(inputFile, `${mediainfoDir}/mediainfo`);
+      videoMIInfo = await getMediaInfo(inputFile, mediainfoDir);
     } catch (e) {
       this.logger.error(e);
       await deleteFolder(transcodeDir);
@@ -193,40 +199,29 @@ export class VideoService {
       }
     });
 
-    this.logger.info('Processing audio');
-    const audioInputForVideo = [];
-    const audioMapForVideo = [];
+    const manifest = new StreamManifest();
 
-    const audioNormalTrack = audioTracks.find(a => a.channels <= 2);
-    const audioSurroundTrack = audioTracks.find(a => a.channels > 2);
+    // Skip audio encoding for other codecs
+    if (codec === VideoCodec.H264) {
+      this.logger.info('Processing audio');
 
-    const firstAudioTrack = audioNormalTrack || audioSurroundTrack;
-    const secondAudioTrack = audioSurroundTrack;
+      const audioNormalTrack = audioTracks.find(a => a.channels <= 2);
+      const audioSurroundTrack = audioTracks.find(a => a.channels > 2);
 
-    this.logger.info(`Audio track index ${firstAudioTrack.index}`);
-    try {
-      const audioDuration = firstAudioTrack.duration ? Math.trunc(+firstAudioTrack.duration) : 0;
-      await this.encodeAudio(inputFile, parsedInput, { audioDuration }, firstAudioTrack.index, audioParams, job);
-    } catch (e) {
-      this.logger.error(JSON.stringify(e));
-      await deleteFolder(transcodeDir);
-      if (e === RejectCode.JOB_CANCEL) {
-        this.logger.info(`Received cancel signal from job id: ${job.id}`);
-        await this.videoResultQueue.add('cancelled-encoding', this.generateStatus(job));
-        return {};
-      }
-      const statusError = await this.generateStatusError(StatusCode.ENCODE_AUDIO_FAILED, job);
-      throw new Error(statusError.errorCode);
-    }
-    audioInputForVideo.push('-i', `"${parsedInput.dir}/${parsedInput.name}_audio_${firstAudioTrack.index}.mp4"`);
-    audioMapForVideo.push('-map', '1:a:0');
+      const firstAudioTrack = audioNormalTrack || audioSurroundTrack;
+      const secondAudioTrack = audioSurroundTrack;
 
-    // Encode second audio track
-    if (secondAudioTrack != null) {
-      this.logger.info(`Audio track index ${secondAudioTrack.index}`);
+      this.logger.info(`Audio track index ${firstAudioTrack.index}`);
       try {
-        const audioDuration = secondAudioTrack.duration ? Math.trunc(+secondAudioTrack.duration) : 0;
-        await this.encodeAudio(inputFile, parsedInput, { audioDuration }, secondAudioTrack.index, audio2ndParams, job);
+        this.logger.info('Audio codec: AAC');
+        const audioDuration = firstAudioTrack.duration ? Math.trunc(+firstAudioTrack.duration) : 0;
+        const audioChannels = firstAudioTrack.channels || 2;
+        const downmix = audioChannels > 2;
+        await this.encodeAudio(inputFile, parsedInput, { audioDuration, audioChannels }, firstAudioTrack.index, AudioCodec.AAC,
+          true, downmix, audioParams, manifest, job);
+        this.logger.info('Audio codec: OPUS');
+        await this.encodeAudio(inputFile, parsedInput, { audioDuration, audioChannels }, firstAudioTrack.index, AudioCodec.OPUS,
+          false, downmix, audioSpeedParams, manifest, job);
       } catch (e) {
         this.logger.error(JSON.stringify(e));
         await deleteFolder(transcodeDir);
@@ -238,31 +233,52 @@ export class VideoService {
         const statusError = await this.generateStatusError(StatusCode.ENCODE_AUDIO_FAILED, job);
         throw new Error(statusError.errorCode);
       }
-      audioInputForVideo.push('-i', `"${parsedInput.dir}/${parsedInput.name}_audio_${secondAudioTrack.index}.mp4"`);
-      audioMapForVideo.push('-map', '2:a:0');
-    }
 
-    const encodeVideoAudioArgs: IEncodeVideoAudioArgs = { inputs: audioInputForVideo, maps: audioMapForVideo };
+      // Encode surround audio track
+      if (secondAudioTrack != null) {
+        this.logger.info(`Audio track index ${secondAudioTrack.index}`);
+        try {
+          this.logger.info('Audio codec: AAC Surround');
+          const audioDuration = secondAudioTrack.duration ? Math.trunc(+secondAudioTrack.duration) : 0;
+          const audioChannels = secondAudioTrack.channels || 0;
+          await this.encodeAudio(inputFile, parsedInput, { audioDuration, audioChannels }, secondAudioTrack.index,
+            AudioCodec.AAC_SURROUND, false, false, audioSurroundParams, manifest, job);
+          this.logger.info('Audio codec: OPUS Surround');
+          await this.encodeAudio(inputFile, parsedInput, { audioDuration, audioChannels }, secondAudioTrack.index,
+            AudioCodec.OPUS_SURROUND, false, false, audioSurroundOpusParams, manifest, job);
+        } catch (e) {
+          this.logger.error(JSON.stringify(e));
+          await deleteFolder(transcodeDir);
+          if (e === RejectCode.JOB_CANCEL) {
+            this.logger.info(`Received cancel signal from job id: ${job.id}`);
+            await this.videoResultQueue.add('cancelled-encoding', this.generateStatus(job));
+            return {};
+          }
+          const statusError = await this.generateStatusError(StatusCode.ENCODE_AUDIO_FAILED, job);
+          throw new Error(statusError.errorCode);
+        }
+      }
+    }
 
     try {
       const sourceInfo: ISourceInfo = {
         videoDuration, videoFps, videoBitrate, videoCodec, videoSourceH264Params,
         videoQuality: srcHeight
       };
-      if (codec === StreamCodec.H264_AAC) {
+      if (codec === VideoCodec.H264) {
         this.logger.info('Video codec: H264');
-        await this.encodeByCodec(inputFile, parsedInput, encodeVideoAudioArgs, sourceInfo,
-          availableQualityList, encodingSettings, StreamCodec.H264_AAC, videoH264Params, job);
+        await this.encodeByCodec(inputFile, parsedInput, sourceInfo,
+          availableQualityList, encodingSettings, VideoCodec.H264, videoH264Params, manifest, job);
       }
-      else if (codec === StreamCodec.VP9_AAC) {
+      else if (codec === VideoCodec.VP9) {
         this.logger.info('Video codec: VP9');
-        await this.encodeByCodec(inputFile, parsedInput, encodeVideoAudioArgs, sourceInfo,
-          availableQualityList, encodingSettings, StreamCodec.VP9_AAC, videoVP9Params, job);
+        await this.encodeByCodec(inputFile, parsedInput, sourceInfo,
+          availableQualityList, encodingSettings, VideoCodec.VP9, videoVP9Params, manifest, job);
       }
-      else if (codec === StreamCodec.AV1_AAC) {
+      else if (codec === VideoCodec.AV1) {
         this.logger.info('Video codec: AV1');
-        await this.encodeByCodec(inputFile, parsedInput, encodeVideoAudioArgs, sourceInfo,
-          availableQualityList, encodingSettings, StreamCodec.AV1_AAC, videoAV1Params, job);
+        await this.encodeByCodec(inputFile, parsedInput, sourceInfo,
+          availableQualityList, encodingSettings, VideoCodec.AV1, videoAV1Params, manifest, job);
       }
       // Generate preview thumbnail
       this.logger.info(`Generating preview thumbnail: ${inputFile}`);
@@ -275,13 +291,13 @@ export class VideoService {
         canceledJobIds: this.CanceledJobIds
       });
       const syncThumbnails = !!job.data.update;
-      const rcloneMoveThumbArgs = this.createRcloneMoveThumbArgs(parsedInput, job.data.storage, job.data._id, syncThumbnails);
+      const rcloneMoveThumbArgs = this.createRcloneMoveThumbArgs(transcodeDir, job.data.storage, job.data._id, syncThumbnails);
       await this.uploadMedia(rcloneMoveThumbArgs, job.id);
 
       if (job.data.replaceStreams?.length) {
         this.logger.info('Removing old streams');
         for (let i = 0; i < job.data.replaceStreams.length; i++) {
-          await deletePath(this.configService.get<string>('RCLONE_CONFIG_FILE'), this.configService.get<string>('RCLONE_DIR'),
+          await deletePath(rcloneConfigFile, rcloneDir,
             job.data.storage, `${job.data._id}/${job.data.replaceStreams[i]}`, (args => {
               this.logger.info('rclone ' + args.join(' '));
             }))
@@ -293,7 +309,8 @@ export class VideoService {
       const checkFilesExclusion = `${this.thumbnailFolder}/**`;
       let uploadedFiles = await this.findUploadedFiles(job.data.storage, job.data._id, job.id, checkFilesExclusion);
       let listAttempt = 1;
-      const totalExpectedFiles = availableQualityList.length + 1;
+      // 1 source file, 3 audio files, and video files
+      const totalExpectedFiles = availableQualityList.length + 1 + 3;
       const maxTries = 5;
       while (uploadedFiles.length < totalExpectedFiles && listAttempt < maxTries) {
         uploadedFiles = await this.findUploadedFiles(job.data.storage, job.data._id, job.id, checkFilesExclusion);
@@ -329,41 +346,116 @@ export class VideoService {
   }
 
   private async encodeAudio(inputFile: string, parsedInput: path.ParsedPath, sourceInfo: ISourceAudioInfo, audioTrackIndex: number,
-    audioParams: string[], job: Job<IVideoData>) {
-    const { audioDuration } = sourceInfo;
-    const audioArgs = this.createAudioEncodingArgs(inputFile, parsedInput, audioParams, audioTrackIndex);
+    codec: number, isDefault: boolean, downmix: boolean, audioParams: string[], manifest: StreamManifest, job: Job<IVideoData>) {
+    const { audioDuration, audioChannels } = sourceInfo;
+    const streamId = await createSnowFlakeId();
+    const bitrate = AudioCodec.OPUS === codec ? 128 : AudioCodec.OPUS_SURROUND === codec ? 64 * audioChannels : 0;
+    const audioArgs = this.createAudioEncodingArgs(inputFile, parsedInput, audioParams, bitrate, downmix, audioTrackIndex);
+    const audioBaseName = `${parsedInput.name}_audio_${audioTrackIndex}`;
+    const audioFileName = `${audioBaseName}.mp4`;
+    const manifestFileName = `${audioBaseName}.m3u8`;
+    const mpdManifestFileName = `${audioBaseName}.mpd`;
+    const playlistFileName = `${audioBaseName}_1.m3u8`;
     await this.encodeMedia(audioArgs, audioDuration, job.id);
+
+    this.logger.info(`Preparing audio file: ${audioFileName}`);
+    await this.prepareMediaFile(audioFileName, parsedInput, `${audioBaseName}_temp`, manifestFileName, job);
+
+    this.logger.info(`Reading audio data: ${audioFileName}, ${mpdManifestFileName}, ${playlistFileName} and ${manifestFileName}`);
+    const audioInfo = await FFprobe(`${parsedInput.dir}/${audioFileName}`, { path: `${this.configService.get<string>('FFMPEG_DIR')}/ffprobe` });
+    const audioTrack = audioInfo.streams.find(s => s.codec_type === 'audio');
+    const audioMIInfo = await getMediaInfo(`${parsedInput.dir}/${audioFileName}`, this.configService.get<string>('MEDIAINFO_DIR'));
+    const audioMITrack = audioMIInfo.media.track.find(s => s['@type'] === 'Audio');
+    if (!audioTrack || !audioMITrack)
+      throw new Error('Failed to get encoded audio info');
+    await manifest.appendAudioPlaylist({
+      mpdPath: `${parsedInput.dir}/${mpdManifestFileName}`,
+      m3u8PlaylistPath: `${parsedInput.dir}/${playlistFileName}`,
+      format: audioMITrack.Format,
+      mimeType: 'audio/mp4',
+      isDefault: isDefault,
+      language: audioMITrack.Language,
+      channels: +audioMITrack.Channels || audioTrack.channels || 2,
+      samplingRate: +audioMITrack.SamplingRate || +audioTrack.sample_rate || 0,
+      codec: codec,
+      uri: `${streamId}/${audioFileName}`
+    });
+
+    const rcloneMoveArgs = this.createRcloneMoveArgs(`${parsedInput.dir}/${audioFileName}`,
+      `${job.data.storage}:${job.data._id}/${streamId}`);
+    await this.uploadMedia(rcloneMoveArgs, job.id);
+
+    await this.kamplexApiService.ensureProducerAppIsOnline(job.data.producerUrl);
+    await this.videoResultQueue.add('add-stream-audio', {
+      ...job.data,
+      jobId: job.id,
+      progress: {
+        sourceId: job.data._id,
+        streamId: streamId,
+        fileName: audioFileName,
+        codec: codec,
+        channels: +audioMITrack.Channels || audioTrack.channels || 2,
+      }
+    });
   }
 
-  private async encodeByCodec(inputFile: string, parsedInput: path.ParsedPath, audioArgs: IEncodeVideoAudioArgs,
+  private async encodeByCodec(inputFile: string, parsedInput: path.ParsedPath,
     sourceInfo: ISourceInfo, qualityList: number[], encodingSettings: IEncodingSetting[], codec: number, videoParams: string[],
-    job: Job<IVideoData>) {
+    manifest: StreamManifest, job: Job<IVideoData>) {
     const { videoDuration } = sourceInfo;
     for (let i = 0; i < qualityList.length; i++) {
       this.logger.info(`Processing video quality: ${qualityList[i]}`);
       const streamId = await createSnowFlakeId();
       const perQualitySettings = encodingSettings.find(s => s.quality === qualityList[i]);
+      const videoBaseName = `${parsedInput.name}_${qualityList[i]}`;
+      const videoFileName = `${videoBaseName}.mp4`;
+      const manifestFileName = `${videoBaseName}.m3u8`;
+      const mpdManifestFileName = `${videoBaseName}.mpd`;
+      const playlistFileName = `${videoBaseName}_1.m3u8`;
       try {
-        if (codec === StreamCodec.H264_AAC) {
-          const videoArgs = this.createVideoEncodingArgs(inputFile, parsedInput, audioArgs, codec, qualityList[i], videoParams,
+        if (codec === VideoCodec.H264) {
+          const videoArgs = this.createVideoEncodingArgs(inputFile, parsedInput, codec, qualityList[i], videoParams,
             sourceInfo, 'crf', perQualitySettings);
-          const rcloneMoveArgs = this.createRcloneMoveArgs(`${parsedInput.dir}/${parsedInput.name}_${qualityList[i]}.mp4`,
-            `${job.data.storage}:${job.data._id}/${streamId}`);
           await this.encodeMedia(videoArgs, videoDuration, job.id);
-          await this.uploadMedia(rcloneMoveArgs, job.id);
         } else {
           // Pass 1 params
-          const videoPass1Args = this.createTwoPassesVideoEncodingArgs(inputFile, parsedInput, audioArgs, codec, qualityList[i],
+          const videoPass1Args = this.createTwoPassesVideoEncodingArgs(inputFile, parsedInput, codec, qualityList[i],
             videoParams, sourceInfo, 'cq', 1, perQualitySettings);
           // Pass 2 params
-          const videoPass2Args = this.createTwoPassesVideoEncodingArgs(inputFile, parsedInput, audioArgs, codec, qualityList[i],
+          const videoPass2Args = this.createTwoPassesVideoEncodingArgs(inputFile, parsedInput, codec, qualityList[i],
             videoParams, sourceInfo, 'cq', 2, perQualitySettings);
-          const rcloneMoveArgs = this.createRcloneMoveArgs(`${parsedInput.dir}/${parsedInput.name}_${qualityList[i]}.mp4`,
-            `${job.data.storage}:${job.data._id}/${streamId}`);
+
           await this.encodeMedia(videoPass1Args, videoDuration, job.id);
           await this.encodeMedia(videoPass2Args, videoDuration, job.id);
-          await this.uploadMedia(rcloneMoveArgs, job.id);
         }
+
+        this.logger.info(`Preparing video file: ${videoFileName}`);
+        await this.prepareMediaFile(videoFileName, parsedInput, `${videoBaseName}_temp`, manifestFileName, job);
+
+        this.logger.info(`Reading video data: ${videoFileName}, ${mpdManifestFileName}, ${playlistFileName} and ${manifestFileName}`);
+        const videoMIInfo = await getMediaInfo(`${parsedInput.dir}/${videoFileName}`, this.configService.get<string>('MEDIAINFO_DIR'));
+        const generalMITrack = videoMIInfo.media.track.find(s => s['@type'] === 'General');
+        const videoMITrack = videoMIInfo.media.track.find(s => s['@type'] === 'Video');
+        if (!videoMITrack)
+          throw new Error('Failed to get encoded video info');
+        manifest.appendVideoPlaylist({
+          mpdPath: `${parsedInput.dir}/${mpdManifestFileName}`,
+          m3u8PlaylistPath: `${parsedInput.dir}/${playlistFileName}`,
+          width: +videoMITrack.Width || 0,
+          height: +videoMITrack.Height || 0,
+          format: videoMITrack.Format,
+          mimeType: 'video/mp4',
+          frameRate: +videoMITrack.FrameRate || +generalMITrack?.FrameRate,
+          codec: codec,
+          uri: `${streamId}/${videoFileName}`
+        });
+
+        const rcloneMoveArgs = this.createRcloneMoveArgs(`${parsedInput.dir}/${videoFileName}`,
+          `${job.data.storage}:${job.data._id}/${streamId}`);
+        await this.uploadMedia(rcloneMoveArgs, job.id);
+
+        // Save and upload manifest file
+        await this.saveManifestFile(manifest, parsedInput.dir, codec, job);
       } catch (e) {
         const rcloneDir = this.configService.get<string>('RCLONE_DIR');
         const rcloneConfig = this.configService.get<string>('RCLONE_CONFIG_FILE');
@@ -386,7 +478,7 @@ export class VideoService {
         progress: {
           sourceId: job.data._id,
           streamId: streamId,
-          fileName: `${parsedInput.name}_${qualityList[i]}.mp4`,
+          fileName: videoFileName,
           codec: codec,
           quality: qualityList[i],
         }
@@ -394,21 +486,79 @@ export class VideoService {
     }
   }
 
-  private createAudioEncodingArgs(inputFile: string, parsedInput: path.ParsedPath, audioParams: string[], audioIndex: number) {
+  private async prepareMediaFile(inputFileName: string, parsedInput: path.ParsedPath, tempFileName: string, playlistName: string,
+    job: Job<IVideoData>) {
+    this.logger.info(`Preparing media file: ${inputFileName}`);
+    const inputFilePath = `${parsedInput.dir}/${inputFileName}`;
+    const inputSourceFile = `${parsedInput.dir}/${job.data.filename}`;
+    const hasFreeSpace = await hasFreeSpaceToCopyFile(inputFilePath);
+    if (!hasFreeSpace) {
+      this.logger.warn(`Not enough disk space to duplicate file, deleting: ${job.data.filename} temporary`);
+      await deleteFile(inputSourceFile);
+    }
+    const mp4boxPackArgs = this.createMP4BoxPackArgs(inputFilePath, parsedInput, tempFileName, playlistName);
+    await this.packageMedia(mp4boxPackArgs, job.id);
+    await deleteFile(inputFilePath);
+    const tempFilePath = `${parsedInput.dir}/${tempFileName}.mp4`;
+    await renameFile(tempFilePath, inputFilePath);
+    if (!hasFreeSpace) {
+      this.logger.info(`Redownloading: ${job.data.filename}`);
+      const rcloneDir = this.configService.get<string>('RCLONE_DIR');
+      const rcloneConfigFile = this.configService.get<string>('RCLONE_CONFIG_FILE');
+      await downloadFile(rcloneConfigFile, rcloneDir, job.data.storage, job.data._id, job.data.filename, parsedInput.dir, (args => {
+        this.logger.info('rclone ' + args.join(' '));
+      }));
+    }
+  }
+
+  private async saveManifestFile(manifest: StreamManifest, transcodeDir: string, codec: number, job: Job<IVideoData>) {
+    const manifestFileName = `manifest_${codec}.json`;
+    const manifestFilePath = `${transcodeDir}/${manifestFileName}`;
+    const streamId = await createSnowFlakeId();
+    this.logger.info(`Generating manifest file: ${manifestFileName}`);
+    await manifest.saveFile(manifestFilePath);
+    const rcloneMoveManifestArgs = this.createRcloneMoveArgs(manifestFilePath, `${job.data.storage}:${job.data._id}/${streamId}`);
+    await this.uploadMedia(rcloneMoveManifestArgs, job.id);
+    await this.videoResultQueue.add('add-stream-manifest', {
+      ...job.data,
+      jobId: job.id,
+      progress: {
+        sourceId: job.data._id,
+        streamId: streamId,
+        fileName: manifestFileName,
+        codec: codec
+      }
+    });
+  }
+
+  private createAudioEncodingArgs(inputFile: string, parsedInput: path.ParsedPath, audioParams: string[],
+    bitrate: number, downmix: boolean, audioIndex: number) {
     const args: string[] = [
       '-hide_banner', '-y',
       '-progress', 'pipe:1',
       '-loglevel', 'error',
       '-i', `"${inputFile}"`,
-      '-vn',
-      ...audioParams,
-      '-map', `0:${audioIndex}`,
-      '-f', 'mp4', `"${parsedInput.dir}/${parsedInput.name}_audio_${audioIndex}.mp4"`
+      '-vn'
     ];
+    if (bitrate > 0) {
+      args.push('-b:a', `${bitrate}K`);
+    }
+    args.push(...audioParams);
+    if (downmix) {
+      args.push(
+        '-af',
+        '"lowpass=c=LFE:f=120,pan=stereo|FL=.3FL+.21FC+.3FLC+.21SL+.21BL+.15BC+.21LFE|FR=.3FR+.21FC+.3FRC+.21SR+.21BR+.15BC+.21LFE"'
+      );
+    }
+    args.push(
+      '-map', `0:${audioIndex}`,
+      '-f', 'mp4',
+      `"${parsedInput.dir}/${parsedInput.name}_audio_${audioIndex}.mp4"`
+    );
     return args;
   }
 
-  private createVideoEncodingArgs(inputFile: string, parsedInput: path.ParsedPath, audioArgs: IEncodeVideoAudioArgs,
+  private createVideoEncodingArgs(inputFile: string, parsedInput: path.ParsedPath,
     codec: number, quality: number, videoParams: string[], sourceInfo: ISourceInfo, crfKey: 'crf' | 'cq',
     encodingSetting?: IEncodingSetting) {
     const gopSize = (sourceInfo.videoFps ? sourceInfo.videoFps * 2 : 48).toString();
@@ -417,27 +567,26 @@ export class VideoService {
       '-progress', 'pipe:1',
       '-loglevel', 'error',
       '-i', `"${inputFile}"`,
-      ...audioArgs.inputs,
       ...videoParams,
       '-g', gopSize,
-      '-keyint_min', gopSize
+      '-keyint_min', gopSize,
+      '-sc_threshold', '0'
     ];
     if (encodingSetting)
       this.resolveEncodingSettings(args, encodingSetting, sourceInfo, crfKey);
-    if (codec === StreamCodec.H264_AAC && sourceInfo.videoQuality === quality && sourceInfo.videoSourceH264Params)
+    if (codec === VideoCodec.H264 && sourceInfo.videoQuality === quality && sourceInfo.videoSourceH264Params)
       args.push('-x264-params', sourceInfo.videoSourceH264Params);
     args.push(
       '-map', '0:v:0',
-      ...audioArgs.maps,
-      '-map_metadata', '-1',
       '-vf', `scale=-2:${quality}`,
-      '-movflags', '+faststart',
-      '-f', 'mp4', `"${parsedInput.dir}/${parsedInput.name}_${quality}.mp4"`
+      //'-movflags', '+faststart',
+      '-f', 'mp4',
+      `"${parsedInput.dir}/${parsedInput.name}_${quality}.mp4"`
     );
     return args;
   }
 
-  private createTwoPassesVideoEncodingArgs(inputFile: string, parsedInput: path.ParsedPath, audioArgs: IEncodeVideoAudioArgs,
+  private createTwoPassesVideoEncodingArgs(inputFile: string, parsedInput: path.ParsedPath,
     codec: number, quality: number, videoParams: string[], sourceInfo: ISourceInfo, crfKey: 'crf' | 'cq', pass: number = 1,
     encodingSetting?: IEncodingSetting) {
     const gopSize = (sourceInfo.videoFps ? sourceInfo.videoFps * 2 : 48).toString();
@@ -450,17 +599,17 @@ export class VideoService {
         '-i', `"${inputFile}"`,
         ...videoParams,
         '-g', gopSize,
-        '-keyint_min', gopSize
+        '-keyint_min', gopSize,
+        '-sc_threshold', '0'
       ];
       if (encodingSetting)
         this.resolveEncodingSettings(args, encodingSetting, sourceInfo, crfKey);
-      if (codec === StreamCodec.H264_AAC && sourceInfo.videoQuality === quality && sourceInfo.videoSourceH264Params)
+      if (codec === VideoCodec.H264 && sourceInfo.videoQuality === quality && sourceInfo.videoSourceH264Params)
         args.push('-x264-params', sourceInfo.videoSourceH264Params);
       args.push(
         '-map', '0:v:0',
-        '-map_metadata', '-1',
         '-vf', `scale=-2:${quality}`,
-        '-movflags', '+faststart',
+        //'-movflags', '+faststart',
         '-passlogfile', `"${parsedInput.dir}/${parsedInput.name}_2pass.log"`,
         '-pass', '1', '-an',
         '-f', 'null', outputName
@@ -472,24 +621,23 @@ export class VideoService {
       '-progress', 'pipe:1',
       '-loglevel', 'error',
       '-i', `"${inputFile}"`,
-      ...audioArgs.inputs,
       ...videoParams,
       '-g', gopSize,
-      '-keyint_min', gopSize
+      '-keyint_min', gopSize,
+      '-sc_threshold', '0'
     ];
     if (encodingSetting)
       this.resolveEncodingSettings(args, encodingSetting, sourceInfo, crfKey);
-    if (codec === StreamCodec.H264_AAC && sourceInfo.videoQuality === quality && sourceInfo.videoSourceH264Params)
+    if (codec === VideoCodec.H264 && sourceInfo.videoQuality === quality && sourceInfo.videoSourceH264Params)
       args.push('-x264-params', sourceInfo.videoSourceH264Params);
     args.push(
       '-map', '0:v:0',
-      ...audioArgs.maps,
-      '-map_metadata', '-1',
       '-vf', `scale=-2:${quality}`,
-      '-movflags', '+faststart',
+      //'-movflags', '+faststart',
       '-passlogfile', `"${parsedInput.dir}/${parsedInput.name}_2pass.log"`,
       '-pass', '2',
-      '-f', 'mp4', `"${parsedInput.dir}/${parsedInput.name}_${quality}.mp4"`
+      '-f', 'mp4',
+      `"${parsedInput.dir}/${parsedInput.name}_${quality}.mp4"`
     );
     return args;
   }
@@ -509,12 +657,15 @@ export class VideoService {
     }
   }
 
-  private createRclonePipeArgs(parsedInput: path.ParsedPath, quality: number, remote: string, parentFolder: string, streamId: string) {
-    const rcloneConfigFile = this.configService.get<string>('RCLONE_CONFIG_FILE');
+  private createMP4BoxPackArgs(input: string, parsedInput: path.ParsedPath, tempFileName: string, playlistName: string) {
     const args: string[] = [
-      '--config', rcloneConfigFile,
-      '--low-level-retries', '5',
-      'rcat', `"${remote}:${parentFolder}/${streamId}/${parsedInput.name}_${quality}.mp4"`
+      '-dash', '6000',
+      '-frag', '6000',
+      '-profile', 'onDemand',
+      '-rap',
+      '-segment-name', `${tempFileName}$Init=$`,
+      '-out', `${parsedInput.dir}/${playlistName}:dual`,
+      input
     ];
     return args;
   }
@@ -532,14 +683,14 @@ export class VideoService {
     return args;
   }
 
-  private createRcloneMoveThumbArgs(parsedInput: path.ParsedPath, remote: string, parentFolder: string, sync: boolean = false) {
+  private createRcloneMoveThumbArgs(transcodeDir: string, remote: string, parentFolder: string, sync: boolean = false) {
     const targetCommand = sync ? 'sync' : 'move';
     const rcloneConfigFile = this.configService.get<string>('RCLONE_CONFIG_FILE');
     const args: string[] = [
       '--config', rcloneConfigFile,
       '--low-level-retries', '5',
       targetCommand,
-      `"${parsedInput.dir}/${this.thumbnailFolder}"`,
+      `"${transcodeDir}/${this.thumbnailFolder}"`,
       `"${remote}:${parentFolder}/${this.thumbnailFolder}"`
     ];
     return args;
@@ -550,7 +701,7 @@ export class VideoService {
       let isCancelled = false;
 
       this.logger.info('ffmpeg ' + args.join(' '));
-      const ffmpeg = child_process.spawn(`${this.configService.get<string>('FFMPEG_DIR')}/ffmpeg`, args, { shell: true });
+      const ffmpeg = child_process.spawn(`"${this.configService.get<string>('FFMPEG_DIR')}/ffmpeg"`, args, { shell: true });
 
       ffmpeg.stdout.setEncoding('utf8');
       ffmpeg.stdout.on('data', async (data: string) => {
@@ -584,12 +735,43 @@ export class VideoService {
     });
   }
 
+  private packageMedia(args: string[], jobId: string | number) {
+    return new Promise<void>((resolve, reject) => {
+      let isCancelled = false;
+
+      this.logger.info('mp4box ' + args.join(' '));
+      const mp4box = child_process.spawn(`"${this.configService.get<string>('MP4BOX_DIR')}/mp4box"`, args, { shell: true });
+
+      mp4box.stderr.setEncoding('utf8');
+      mp4box.stderr.on('data', (data) => {
+        stdout.write(data);
+      });
+
+      const cancelledJobChecker = this.createCancelJobChecker(jobId, () => {
+        isCancelled = true;
+        mp4box.kill('SIGINT'); // Stop key
+      });
+
+      mp4box.on('exit', (code: number) => {
+        stdout.write('\n');
+        clearInterval(cancelledJobChecker);
+        if (isCancelled) {
+          reject(RejectCode.JOB_CANCEL);
+        } else if (code !== 0) {
+          reject(`MP4Box exited with status code: ${code}`);
+        } else {
+          resolve();
+        }
+      });
+    });
+  }
+
   private uploadMedia(args: string[], jobId: string | number) {
     return new Promise<void>((resolve, reject) => {
       let isCancelled = false;
 
       this.logger.info('rclone ' + args.join(' '));
-      const rclone = child_process.spawn(`${this.configService.get<string>('RCLONE_DIR')}/rclone`, args, { shell: true });
+      const rclone = child_process.spawn(`"${this.configService.get<string>('RCLONE_DIR')}/rclone"`, args, { shell: true });
 
       rclone.stderr.setEncoding('utf8');
       rclone.stderr.on('data', (data) => {
@@ -625,36 +807,6 @@ export class VideoService {
     }, ms)
   }
 
-  private pipeEncodeMedia(ffmpegArgs: string[], rcloneArgs: string[], videoDuration: number) {
-    return new Promise<void>((resolve, reject) => {
-      const ffmpegDir = this.configService.get<string>('FFMPEG_DIR');
-      const rcloneDir = this.configService.get<string>('RCLONE_DIR');
-      this.logger.info('ffmpeg ' + ffmpegArgs.join(' ') + ' | ' + 'rclone ' + rcloneArgs.join(' '));
-      const ffmpeg = child_process.spawn(`${ffmpegDir}/ffmpeg`, ffmpegArgs, { shell: true });
-      const rclone = child_process.spawn(`${rcloneDir}/rclone`, rcloneArgs, { shell: true });
-
-      ffmpeg.stdout.pipe(rclone.stdin);
-
-      ffmpeg.stderr.setEncoding('utf8');
-      ffmpeg.stderr.on('data', (data) => {
-        const progress = parseProgress(data);
-        const percent = progressPercent(progress.outTimeMs, videoDuration * 1000000);
-        stdout.write(`Encoding: ${percent}% - frame: ${progress.frame || 'N/A'} - fps: ${progress.fps || 'N/A'} - bitrate: ${progress.bitrate} - time: ${progress.outTime}\r`);
-      });
-
-      ffmpeg.on('exit', (code: number) => {
-        stdout.write('\n');
-        setTimeout(() => {
-          if (code !== 0) {
-            reject(code);
-          } else {
-            resolve();
-          }
-        }, 5000);
-      });
-    });
-  }
-
   private findUploadedFiles(remote: string, parentFolder: string, jobId: string | number, exclude?: string) {
     const rcloneConfigFile = this.configService.get<string>('RCLONE_CONFIG_FILE');
     const args: string[] = [
@@ -668,7 +820,7 @@ export class VideoService {
     return new Promise<RcloneFile[]>((resolve, reject) => {
       let isCancelled = false;
       this.logger.info('rclone ' + args.join(' '));
-      const rclone = child_process.spawn(`${this.configService.get<string>('RCLONE_DIR')}/rclone`, args, { shell: true });
+      const rclone = child_process.spawn(`"${this.configService.get<string>('RCLONE_DIR')}/rclone"`, args, { shell: true });
 
       let listJson = '';
 
