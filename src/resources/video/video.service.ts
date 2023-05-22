@@ -658,13 +658,14 @@ export class VideoService {
   }
 
   private createMP4BoxPackArgs(input: string, parsedInput: path.ParsedPath, tempFileName: string, playlistName: string) {
+    const segmentInitName = process.platform === 'win32' ? '$Init=$' : '\\$Init=\\$';
     const args: string[] = [
       '-dash', '6000',
       '-frag', '6000',
       '-profile', 'onDemand',
       '-rap',
-      '-segment-name', `${tempFileName}$Init=$`,
-      '-out', `${parsedInput.dir}/${playlistName}:dual`,
+      '-segment-name', `"${tempFileName}${segmentInitName}"`,
+      '-out', `"${parsedInput.dir}/${playlistName}:dual"`,
       input
     ];
     return args;
@@ -739,8 +740,8 @@ export class VideoService {
     return new Promise<void>((resolve, reject) => {
       let isCancelled = false;
 
-      this.logger.info('mp4box ' + args.join(' '));
-      const mp4box = child_process.spawn(`"${this.configService.get<string>('MP4BOX_DIR')}/mp4box"`, args, { shell: true });
+      this.logger.info('MP4Box ' + args.join(' '));
+      const mp4box = child_process.spawn(`"${this.configService.get<string>('MP4BOX_DIR')}/MP4Box"`, args, { shell: true });
 
       mp4box.stderr.setEncoding('utf8');
       mp4box.stderr.on('data', (data) => {
