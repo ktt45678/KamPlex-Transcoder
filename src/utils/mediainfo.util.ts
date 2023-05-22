@@ -1,10 +1,15 @@
 import child_process from 'child_process';
 
 const KNWON_ENCODING_SETTINGS = ['cabac', 'ref', 'deblock', 'analyse', 'me', 'subme', 'psy', 'psy_rd', 'mixed_ref', 'me_range',
-  'chroma_me', 'trellis', '8x8dct', 'deadzone', 'fast_pskip', 'chroma_qp_offset', 'threads', 'lookahead_threads', 'sliced_threads',
-  'nr', 'decimate', 'interlaced', 'bluray_compat', 'constrained_intra', 'bframes', 'b_pyramid', 'b_adapt', 'b_bias', 'direct',
-  'weightb', 'open_gop', 'weightp', 'scenecut', 'intra_refresh', 'rc_lookahead', 'rc', 'mbtree',
-  'qcomp', 'qpmin', 'qpmax', 'qpstep', 'nal_hrd', 'filler', 'ip_ratio', 'aq'
+  'chroma_me', 'trellis', '8x8dct', 'deadzone', 'fast_pskip', 'nr', 'decimate', 'interlaced', 'bluray_compat', 'constrained_intra',
+  'bframes', 'b_pyramid', 'b_adapt', 'b_bias', 'direct', 'weightb', 'weightp', 'scenecut', 'intra_refresh', 'rc_lookahead', 'mbtree',
+  'nal_hrd', 'filler', 'ip_ratio', 'aq'
+];
+
+const MULTI_RES_ENCODING_SETTINGS = ['cabac', 'ref', 'deblock', 'analyse', 'me', 'subme', 'psy', 'psy_rd', 'mixed_ref', 'me_range',
+  'trellis', '8x8dct', 'deadzone', 'fast_pskip', 'nr', 'decimate', 'interlaced', 'bluray_compat', 'constrained_intra', 'bframes',
+  'b_pyramid', 'b_bias', 'weightb', 'weightp', 'scenecut', 'intra_refresh', 'rc_lookahead', 'mbtree',
+  'nal_hrd', 'filler', 'ip_ratio', 'aq'
 ];
 
 export function getMediaInfo(input: string, mediainfoDir: string) {
@@ -36,12 +41,13 @@ export function getMediaInfo(input: string, mediainfoDir: string) {
   });
 }
 
-export function createH264Params(encodedLibrarySettings: string) {
+export function createH264Params(encodedLibrarySettings: string, sameRes: boolean = false) {
   if (!encodedLibrarySettings) return '';
   const settingList = encodedLibrarySettings.replace(/:/g, '\\:').split(' / ');
+  const encodingSettings = sameRes ? KNWON_ENCODING_SETTINGS : MULTI_RES_ENCODING_SETTINGS;
   const filteredList = settingList.filter(value => {
     const key = value.split('=')[0];
-    if (KNWON_ENCODING_SETTINGS.indexOf(key) > -1)
+    if (encodingSettings.indexOf(key) > -1)
       return true
     return false;
   });

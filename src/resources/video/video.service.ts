@@ -159,7 +159,7 @@ export class VideoService {
       videoMITrack.BitRate ? Math.round(+videoMITrack.BitRate / 1000) : 0; // Bitrate in Kbps
     const videoCodec = videoTrack.codec_name || '';
     const videoSourceH264Params = (videoCodec === 'h264' && videoMITrack.Encoded_Library_Settings) ?
-      createH264Params(videoMITrack.Encoded_Library_Settings) : '';
+      videoMITrack.Encoded_Library_Settings : '';
 
     const allQualityList = this.calculateQuality(videoTrack.height, qualityList);
     this.logger.info(`All quality: ${allQualityList.length ? allQualityList.join(', ') : 'None'}`);
@@ -574,8 +574,10 @@ export class VideoService {
     ];
     if (encodingSetting)
       this.resolveEncodingSettings(args, encodingSetting, sourceInfo, crfKey);
-    if (codec === VideoCodec.H264 && sourceInfo.videoQuality === quality && sourceInfo.videoSourceH264Params)
-      args.push('-x264-params', sourceInfo.videoSourceH264Params);
+    if (codec === VideoCodec.H264 && sourceInfo.videoSourceH264Params) {
+      const x264Params = createH264Params(sourceInfo.videoSourceH264Params, sourceInfo.videoQuality === quality);
+      args.push('-x264-params', `"${x264Params}"`);
+    }
     args.push(
       '-map', '0:v:0',
       '-vf', `scale=-2:${quality}`,
@@ -604,8 +606,10 @@ export class VideoService {
       ];
       if (encodingSetting)
         this.resolveEncodingSettings(args, encodingSetting, sourceInfo, crfKey);
-      if (codec === VideoCodec.H264 && sourceInfo.videoQuality === quality && sourceInfo.videoSourceH264Params)
-        args.push('-x264-params', sourceInfo.videoSourceH264Params);
+      if (codec === VideoCodec.H264 && sourceInfo.videoSourceH264Params) {
+        const x264Params = createH264Params(sourceInfo.videoSourceH264Params, sourceInfo.videoQuality === quality);
+        args.push('-x264-params', `"${x264Params}"`);
+      }
       args.push(
         '-map', '0:v:0',
         '-vf', `scale=-2:${quality}`,
@@ -628,8 +632,10 @@ export class VideoService {
     ];
     if (encodingSetting)
       this.resolveEncodingSettings(args, encodingSetting, sourceInfo, crfKey);
-    if (codec === VideoCodec.H264 && sourceInfo.videoQuality === quality && sourceInfo.videoSourceH264Params)
-      args.push('-x264-params', sourceInfo.videoSourceH264Params);
+    if (codec === VideoCodec.H264 && sourceInfo.videoSourceH264Params) {
+      const x264Params = createH264Params(sourceInfo.videoSourceH264Params, sourceInfo.videoQuality === quality);
+      args.push('-x264-params', `"${x264Params}"`);
+    }
     args.push(
       '-map', '0:v:0',
       '-vf', `scale=-2:${quality}`,
