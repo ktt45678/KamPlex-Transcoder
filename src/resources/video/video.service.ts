@@ -179,7 +179,7 @@ export class VideoService {
       this.logger.info('Everything is already encoded, no need to continue');
       await deleteFolder(transcodeDir);
       await this.kamplexApiService.ensureProducerAppIsOnline(job.data.producerUrl);
-      await this.videoResultQueue.add('cancelled-encoding', this.generateStatus(job));
+      await this.videoResultQueue.add('cancelled-encoding', { ...job.data, jobId: job.id, keepStreams: true });
       return {};
     }
 

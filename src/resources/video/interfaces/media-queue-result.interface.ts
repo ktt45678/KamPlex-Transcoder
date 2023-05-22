@@ -26,6 +26,8 @@ export interface MediaQueueResult {
   progress?: Partial<MediaQueueProgress>;
 
   errorCode?: string;
+
+  keepStreams?: boolean;
 }
 
 export interface MediaQueueProgress {
