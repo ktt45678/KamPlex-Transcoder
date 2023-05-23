@@ -10,11 +10,11 @@ export class StreamManifest {
 
   constructor() {
     this.manifest = {
-      version: 7,
+      hlsVersion: 7,
       videoTracks: [],
       audioTracks: [],
-      targetDuration: 0, // Will be set later
-      segmentDuration: 6,
+      totalDuration: 0, // Will be set later
+      targetDuration: 6,
       mediaSequence: 0,
       playlistType: 'VOD'
     };
@@ -31,7 +31,7 @@ export class StreamManifest {
     const videoPlaylist = mpdManifest.MPD.Period.AdaptationSet;
     const mpdIndexRange = videoPlaylist.Representation.SegmentBase.indexRange.split('-');
     const mpdInitRange = videoPlaylist.Representation.SegmentBase.Initialization.range.split('-');
-    this.manifest.targetDuration = Duration.fromISO(mpdManifest.MPD.mediaPresentationDuration).as('seconds');
+    this.manifest.totalDuration = Duration.fromISO(mpdManifest.MPD.mediaPresentationDuration).as('seconds');
     this.manifest.videoTracks.push({
       codec: videoPlaylist.Representation.codecs,
       codecID: codec,
@@ -111,6 +111,7 @@ export class StreamManifest {
     parser.end();
     if (!parser.manifest.segments.length) return;
     const segmentGroup: HlsSegmentGroup = {
+      targetDuration: parser.manifest.targetDuration,
       byterange: parser.manifest.segments[0].map.byterange,
       segments: []
     };
