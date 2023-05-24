@@ -493,7 +493,7 @@ export class VideoService {
     const inputSourceFile = `${parsedInput.dir}/${job.data.filename}`;
     const hasFreeSpace = await hasFreeSpaceToCopyFile(inputFilePath);
     if (!hasFreeSpace) {
-      this.logger.warn(`Not enough disk space to duplicate file, deleting: ${job.data.filename} temporary`);
+      this.logger.warning(`Not enough disk space to duplicate file, deleting: ${job.data.filename} temporary`);
       await deleteFile(inputSourceFile);
     }
     const mp4boxPackArgs = this.createMP4BoxPackArgs(inputFilePath, parsedInput, tempFileName, playlistName);

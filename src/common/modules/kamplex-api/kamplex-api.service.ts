@@ -26,7 +26,7 @@ export class KamplexApiService {
       }
       const isValidUrl = await this.isValidApiUrl(url);
       if (!isValidUrl) {
-        this.logger.warn(`Invalid producer url detected, retrying in ${retryTimeout}ms`);
+        this.logger.warning(`Invalid producer url detected, retrying in ${retryTimeout}ms`);
         await new Promise(r => setTimeout(r, retryTimeout));
         totalRetries++;
         continue;
