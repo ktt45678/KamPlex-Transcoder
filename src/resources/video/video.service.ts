@@ -89,6 +89,8 @@ export class VideoService {
     const transcodeDir = `${this.configService.get<string>('TRANSCODE_DIR')}/${job.id}`;
     const ffmpegDir = this.configService.get<string>('FFMPEG_DIR');
     const mediainfoDir = this.configService.get<string>('MEDIAINFO_DIR');
+    const inputFile = `${transcodeDir}/${job.data.filename}`;
+    const parsedInput = path.parse(inputFile);
 
     const configExists = await findInFile(rcloneConfigFile, `[${job.data.storage}]`);
     if (!configExists) {
@@ -104,11 +106,25 @@ export class VideoService {
       this.logger.info(`Generated config for remote "${job.data.storage}"`);
     }
 
+    let availableQualityList: number[] | null = null;
+    // Find and validate source quality if the quality is available on db
+    {
+      const sourceInfo = await mediaStorageModel.findOne({ _id: job.data._id }, { _id: 1, name: 1, quality: 1 }).lean().exec();
+      if (sourceInfo?.quality) {
+        try {
+          availableQualityList = await this.validateSourceQuality(parsedInput, sourceInfo.quality, qualityList, codec, job);
+          if (availableQualityList === null)
+            return {}; // There's nothing to encode
+        } finally {
+          if (availableQualityList === null)
+            await deleteFolder(transcodeDir);
+        }
+      }
+    }
+
     // Disconnect MongoDB
     await mongoose.disconnect();
 
-    const inputFile = `${transcodeDir}/${job.data.filename}`;
-    const parsedInput = path.parse(inputFile);
     this.logger.info(`Downloading file from media id: ${job.data._id}`);
     try {
       const isFileExists = await fileExists(inputFile);
@@ -161,26 +177,16 @@ export class VideoService {
     const videoSourceH264Params = (videoCodec === 'h264' && videoMITrack.Encoded_Library_Settings) ?
       videoMITrack.Encoded_Library_Settings : '';
 
-    const allQualityList = this.calculateQuality(videoTrack.height, qualityList);
-    this.logger.info(`All quality: ${allQualityList.length ? allQualityList.join(', ') : 'None'}`);
-    if (!allQualityList.length) {
-      await deleteFolder(transcodeDir);
-      const statusError = await this.generateStatusError(StatusCode.LOW_QUALITY_VIDEO, job, { discard: true });
-      throw new UnrecoverableError(statusError.errorCode);
-    }
-
-    // Check already encoded files
-    this.logger.info('Checking already encoded files');
-    let alreadyEncodedFiles = await this.findUploadedFiles(job.data.storage, job.data._id, job.id, `${this.thumbnailFolder}/**`);
-    const availableQualityList = await this.findAvailableQuality(alreadyEncodedFiles, allQualityList, parsedInput, codec,
-      job.data.replaceStreams);
-    this.logger.info(`Available quality: ${availableQualityList.length ? availableQualityList.join(', ') : 'None'}`);
-    if (!availableQualityList.length) {
-      this.logger.info('Everything is already encoded, no need to continue');
-      await deleteFolder(transcodeDir);
-      await this.kamplexApiService.ensureProducerAppIsOnline(job.data.producerUrl);
-      await this.videoResultQueue.add('cancelled-encoding', { ...job.data, jobId: job.id, keepStreams: true });
-      return {};
+    // Validate source file by reading the local file
+    if (!availableQualityList) {
+      try {
+        availableQualityList = await this.validateSourceQuality(parsedInput, videoTrack.height, qualityList, codec, job);
+        if (availableQualityList === null)
+          return {}; // There's nothing to encode
+      } finally {
+        if (availableQualityList === null)
+          await deleteFolder(transcodeDir);
+      }
     }
 
     const srcWidth = videoTrack.width || 0;
@@ -243,9 +249,12 @@ export class VideoService {
           const audioChannels = secondAudioTrack.channels || 0;
           await this.encodeAudio(inputFile, parsedInput, { audioDuration, audioChannels }, secondAudioTrack.index,
             AudioCodec.AAC_SURROUND, false, false, audioSurroundParams, manifest, job);
-          this.logger.info('Audio codec: OPUS Surround');
-          await this.encodeAudio(inputFile, parsedInput, { audioDuration, audioChannels }, secondAudioTrack.index,
-            AudioCodec.OPUS_SURROUND, false, false, audioSurroundOpusParams, manifest, job);
+          // Only encode opus surround if the source audio has 6 (5.1) or 8 (7.1) channels
+          if ([6, 8].includes(audioChannels)) {
+            this.logger.info('Audio codec: OPUS Surround');
+            await this.encodeAudio(inputFile, parsedInput, { audioDuration, audioChannels }, secondAudioTrack.index,
+              AudioCodec.OPUS_SURROUND, false, false, audioSurroundOpusParams, manifest, job);
+          }
         } catch (e) {
           this.logger.error(JSON.stringify(e));
           await deleteFolder(transcodeDir);
@@ -350,7 +359,7 @@ export class VideoService {
     const { audioDuration, audioChannels } = sourceInfo;
     const streamId = await createSnowFlakeId();
     const bitrate = AudioCodec.OPUS === codec ? 128 : AudioCodec.OPUS_SURROUND === codec ? 64 * audioChannels : 0;
-    const audioArgs = this.createAudioEncodingArgs(inputFile, parsedInput, audioParams, bitrate, downmix, audioTrackIndex);
+    const audioArgs = this.createAudioEncodingArgs(inputFile, parsedInput, audioParams, bitrate, audioChannels, downmix, audioTrackIndex);
     const audioBaseName = `${parsedInput.name}_audio_${audioTrackIndex}`;
     const audioFileName = `${audioBaseName}.mp4`;
     const manifestFileName = `${audioBaseName}.m3u8`;
@@ -358,7 +367,6 @@ export class VideoService {
     const playlistFileName = `${audioBaseName}_1.m3u8`;
     await this.encodeMedia(audioArgs, audioDuration, job.id);
 
-    this.logger.info(`Preparing audio file: ${audioFileName}`);
     await this.prepareMediaFile(audioFileName, parsedInput, `${audioBaseName}_temp`, manifestFileName, job);
 
     this.logger.info(`Reading audio data: ${audioFileName}, ${mpdManifestFileName}, ${playlistFileName} and ${manifestFileName}`);
@@ -429,7 +437,6 @@ export class VideoService {
           await this.encodeMedia(videoPass2Args, videoDuration, job.id);
         }
 
-        this.logger.info(`Preparing video file: ${videoFileName}`);
         await this.prepareMediaFile(videoFileName, parsedInput, `${videoBaseName}_temp`, manifestFileName, job);
 
         this.logger.info(`Reading video data: ${videoFileName}, ${mpdManifestFileName}, ${playlistFileName} and ${manifestFileName}`);
@@ -532,7 +539,7 @@ export class VideoService {
   }
 
   private createAudioEncodingArgs(inputFile: string, parsedInput: path.ParsedPath, audioParams: string[],
-    bitrate: number, downmix: boolean, audioIndex: number) {
+    bitrate: number, channels: number, downmix: boolean, audioIndex: number) {
     const args: string[] = [
       '-hide_banner', '-y',
       '-progress', 'pipe:1',
@@ -546,12 +553,16 @@ export class VideoService {
     args.push(...audioParams);
     if (downmix) {
       args.push(
-        '-af',
+        '-ac', '2', '-af',
         '"lowpass=c=LFE:f=120,pan=stereo|FL=.3FL+.21FC+.3FLC+.21SL+.21BL+.15BC+.21LFE|FR=.3FR+.21FC+.3FRC+.21SR+.21BR+.15BC+.21LFE"'
       );
+    } else if (channels > 2) {
+      const channelValue = channels <= 8 ? channels.toString() : '8'; // 8 channels (7.1) is the limit for both aac and opus
+      args.push('-ac', channelValue);
     }
     args.push(
       '-map', `0:${audioIndex}`,
+      '-map_metadata', '-1',
       '-f', 'mp4',
       `"${parsedInput.dir}/${parsedInput.name}_audio_${audioIndex}.mp4"`
     );
@@ -580,6 +591,7 @@ export class VideoService {
     }
     args.push(
       '-map', '0:v:0',
+      '-map_metadata', '-1',
       '-vf', `scale=-2:${quality}`,
       //'-movflags', '+faststart',
       '-f', 'mp4',
@@ -638,6 +650,7 @@ export class VideoService {
     }
     args.push(
       '-map', '0:v:0',
+      '-map_metadata', '-1',
       '-vf', `scale=-2:${quality}`,
       //'-movflags', '+faststart',
       '-passlogfile', `"${parsedInput.dir}/${parsedInput.name}_2pass.log"`,
@@ -667,12 +680,10 @@ export class VideoService {
     const segmentInitName = process.platform === 'win32' ? '$Init=$' : '\\$Init=\\$';
     const args: string[] = [
       '-dash', '6000',
-      '-frag', '6000',
       '-profile', 'onDemand',
-      '-rap',
       '-segment-name', `"${tempFileName}${segmentInitName}"`,
       '-out', `"${parsedInput.dir}/${playlistName}:dual"`,
-      input
+      `"${input}"`
     ];
     return args;
   }
@@ -892,6 +903,30 @@ export class VideoService {
     // Use the lowest quality when there is no suitable one
     if (!availableQualityList.length)
       availableQualityList.push(Math.min(...qualityList));
+    return availableQualityList;
+  }
+
+  private async validateSourceQuality(parsedInput: path.ParsedPath, quality: number, qualityList: number[], codec: number,
+    job: Job<IVideoData>): Promise<number[] | null> {
+    const allQualityList = this.calculateQuality(quality, qualityList);
+    this.logger.info(`All quality: ${allQualityList.length ? allQualityList.join(', ') : 'None'}`);
+    if (!allQualityList.length) {
+      const statusError = await this.generateStatusError(StatusCode.LOW_QUALITY_VIDEO, job, { discard: true });
+      throw new UnrecoverableError(statusError.errorCode);
+    }
+
+    // Check already encoded files
+    this.logger.info('Checking already encoded files');
+    let alreadyEncodedFiles = await this.findUploadedFiles(job.data.storage, job.data._id, job.id, `${this.thumbnailFolder}/**`);
+    const availableQualityList = await this.findAvailableQuality(alreadyEncodedFiles, allQualityList, parsedInput, codec,
+      job.data.replaceStreams);
+    this.logger.info(`Available quality: ${availableQualityList.length ? availableQualityList.join(', ') : 'None'}`);
+    if (!availableQualityList.length) {
+      this.logger.info('Everything is already encoded, no need to continue');
+      await this.kamplexApiService.ensureProducerAppIsOnline(job.data.producerUrl);
+      await this.videoResultQueue.add('cancelled-encoding', { ...job.data, jobId: job.id, keepStreams: true });
+      return null;
+    }
     return availableQualityList;
   }
 
