@@ -65,8 +65,6 @@ export class VideoService {
     if (cancelIndex > -1) {
       this.CanceledJobIds = this.CanceledJobIds.filter(id => +id > +job.id);
       this.logger.info(`Received cancel signal from job id: ${job.id}`);
-      await this.kamplexApiService.ensureProducerAppIsOnline(job.data.producerUrl);
-      await this.videoResultQueue.add('cancelled-encoding', this.generateStatus(job));
       return {};
     }
 
@@ -233,7 +231,6 @@ export class VideoService {
         await deleteFolder(transcodeDir);
         if (e === RejectCode.JOB_CANCEL) {
           this.logger.info(`Received cancel signal from job id: ${job.id}`);
-          await this.videoResultQueue.add('cancelled-encoding', this.generateStatus(job));
           return {};
         }
         const statusError = await this.generateStatusError(StatusCode.ENCODE_AUDIO_FAILED, job);
@@ -260,7 +257,6 @@ export class VideoService {
           await deleteFolder(transcodeDir);
           if (e === RejectCode.JOB_CANCEL) {
             this.logger.info(`Received cancel signal from job id: ${job.id}`);
-            await this.videoResultQueue.add('cancelled-encoding', this.generateStatus(job));
             return {};
           }
           const statusError = await this.generateStatusError(StatusCode.ENCODE_AUDIO_FAILED, job);
@@ -330,8 +326,8 @@ export class VideoService {
       this.logger.error(JSON.stringify(e));
       if (e === RejectCode.JOB_CANCEL) {
         this.logger.info(`Received cancel signal from job id: ${job.id}`);
-        await this.kamplexApiService.ensureProducerAppIsOnline(job.data.producerUrl);
-        await this.videoResultQueue.add('cancelled-encoding', this.generateStatus(job));
+        //await this.kamplexApiService.ensureProducerAppIsOnline(job.data.producerUrl);
+        //await this.videoResultQueue.add('cancelled-encoding', this.generateStatus(job));
         return {};
       }
       const statusError = await this.generateStatusError(StatusCode.ENCODE_VIDEO_FAILED, job);
@@ -358,8 +354,8 @@ export class VideoService {
     codec: number, isDefault: boolean, downmix: boolean, audioParams: string[], manifest: StreamManifest, job: Job<IVideoData>) {
     const { audioDuration, audioChannels } = sourceInfo;
     const streamId = await createSnowFlakeId();
-    const bitrate = AudioCodec.OPUS === codec ? 128 : AudioCodec.OPUS_SURROUND === codec ? 64 * audioChannels : 0;
-    const audioArgs = this.createAudioEncodingArgs(inputFile, parsedInput, audioParams, bitrate, audioChannels, downmix, audioTrackIndex);
+    const audioArgs = this.createAudioEncodingArgs(inputFile, parsedInput, audioParams, codec, audioChannels, downmix,
+      audioTrackIndex);
     const audioBaseName = `${parsedInput.name}_audio_${audioTrackIndex}`;
     const audioFileName = `${audioBaseName}.mp4`;
     const manifestFileName = `${audioBaseName}.m3u8`;
@@ -539,7 +535,8 @@ export class VideoService {
   }
 
   private createAudioEncodingArgs(inputFile: string, parsedInput: path.ParsedPath, audioParams: string[],
-    bitrate: number, channels: number, downmix: boolean, audioIndex: number) {
+    codec: number, channels: number, downmix: boolean, audioIndex: number) {
+    const bitrate = AudioCodec.OPUS === codec ? 128 : AudioCodec.OPUS_SURROUND === codec ? 64 * channels : 0;
     const args: string[] = [
       '-hide_banner', '-y',
       '-progress', 'pipe:1',
@@ -552,10 +549,15 @@ export class VideoService {
     }
     args.push(...audioParams);
     if (downmix) {
-      args.push(
-        '-ac', '2', '-af',
-        '"lowpass=c=LFE:f=120,pan=stereo|FL=.3FL+.21FC+.3FLC+.21SL+.21BL+.15BC+.21LFE|FR=.3FR+.21FC+.3FRC+.21SR+.21BR+.15BC+.21LFE"'
-      );
+      if (codec === AudioCodec.AAC) {
+        args.push(
+          '-af',
+          '"lowpass=c=LFE:f=120,pan=stereo|FL=.3FL+.21FC+.3FLC+.21SL+.21BL+.15BC+.21LFE|FR=.3FR+.21FC+.3FRC+.21SR+.21BR+.15BC+.21LFE,volume=1.6"'
+        );
+      }
+      else {
+        args.push('-ac', '2');
+      }
     } else if (channels > 2) {
       const channelValue = channels <= 8 ? channels.toString() : '8'; // 8 channels (7.1) is the limit for both aac and opus
       args.push('-ac', channelValue);
@@ -563,6 +565,7 @@ export class VideoService {
     args.push(
       '-map', `0:${audioIndex}`,
       '-map_metadata', '-1',
+      '-map_chapters', '-1',
       '-f', 'mp4',
       `"${parsedInput.dir}/${parsedInput.name}_audio_${audioIndex}.mp4"`
     );
@@ -592,6 +595,7 @@ export class VideoService {
     args.push(
       '-map', '0:v:0',
       '-map_metadata', '-1',
+      '-map_chapters', '-1',
       '-vf', `scale=-2:${quality}`,
       //'-movflags', '+faststart',
       '-f', 'mp4',
@@ -651,6 +655,7 @@ export class VideoService {
     args.push(
       '-map', '0:v:0',
       '-map_metadata', '-1',
+      '-map_chapters', '-1',
       '-vf', `scale=-2:${quality}`,
       //'-movflags', '+faststart',
       '-passlogfile', `"${parsedInput.dir}/${parsedInput.name}_2pass.log"`,
