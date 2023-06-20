@@ -10,6 +10,7 @@ import child_process from 'child_process';
 
 import { parseProgress, progressPercent } from './ffmpeg-helper.util';
 import { RejectCode } from '../enums/reject-code.enum';
+import { fileExists } from './file-helper.util';
 
 interface GeneratorOptions {
   /** The source video file. Must be an FFMPEG supported video format. */
@@ -54,8 +55,10 @@ export async function generateSprites(options: GeneratorOptions): Promise<Genera
 
   const sourceFile = options.source;
 
-  const tw = options.tw || 160;
-  const th = options.th || 90;
+  let tw = options.tw || 160;
+  let th = options.th || 90;
+  const maxWidth = 160;
+  const maxHeight = 160;
 
   //const toWebp = options.toWebp || false;
 
@@ -74,7 +77,7 @@ export async function generateSprites(options: GeneratorOptions): Promise<Genera
   //if (doLogging) console.log(`Predicting ${predicted} frames`);
   //console.log(`Predicting ${predicted} frames`);
 
-  let frameCount = await generateThumbnails(sourceFile, tempPath, tw, th, options);
+  let frameCount = await generateThumbnails(sourceFile, tempPath, maxWidth, maxHeight, options);
 
   //console.log(`Generated: ${f.length} frames.`);
 
@@ -100,6 +103,13 @@ export async function generateSprites(options: GeneratorOptions): Promise<Genera
   let vttString = 'WEBVTT';
   let vttStartTime = 0;
   let vttEndTime = 1;
+
+  const firstThumbPath = path.join(tempPath, 'thumb_1.png');
+  if (await fileExists(firstThumbPath)) {
+    const thumbMetadata = await sharp(firstThumbPath).metadata();
+    thumbMetadata.width && (tw = thumbMetadata.width);
+    thumbMetadata.height && (th = thumbMetadata.height);
+  }
 
   for (let pageID = 0; pageID < pages; pageID++) {
 
@@ -170,7 +180,7 @@ export async function generateSprites(options: GeneratorOptions): Promise<Genera
   return output;
 }
 
-function generateThumbnails(inputFile: string, outputFolder: string, tw: number, th: number, options: GeneratorOptions) {
+function generateThumbnails(inputFile: string, outputFolder: string, maxWidth: number, maxHeight: number, options: GeneratorOptions) {
   return new Promise<number>((resolve, reject) => {
     let isCancelled = false;
 
@@ -179,7 +189,7 @@ function generateThumbnails(inputFile: string, outputFolder: string, tw: number,
       '-progress', 'pipe:1',
       '-loglevel', 'error',
       '-i', `"${inputFile}"`,
-      '-vf', `fps=1/1,scale=${tw}:${th}`,
+      '-vf', `"fps=1/1,scale=if(gte(iw\\,ih)\\,min(${maxWidth}\\,iw)\\,-2):if(lt(iw\\,ih)\\,min(${maxHeight}\\,ih)\\,-2)"`,
       '-qmin', '1',
       '-qscale:v', '1',
       '-f', 'image2',

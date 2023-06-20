@@ -25,7 +25,7 @@ import {
 } from '../../utils';
 
 type JobNameType = 'update-source' | 'add-stream-video' | 'add-stream-audio' | 'add-stream-manifest' | 'finished-encoding' |
-  'cancelled-encoding' | 'failed-encoding';
+  'cancelled-encoding' | 'retry-encoding' | 'failed-encoding';
 
 @Injectable()
 export class VideoService {
@@ -209,10 +209,11 @@ export class VideoService {
     if (codec === VideoCodec.H264) {
       this.logger.info('Processing audio');
 
-      const audioNormalTrack = audioTracks.find(a => a.channels <= 2);
-      const audioSurroundTrack = audioTracks.find(a => a.channels > 2);
+      const defaultAudioTrack = audioTracks.find(a => a.disposition.default) || audioTracks[0];
+      const audioNormalTrack = audioTracks.find(a => a.channels <= 2 && a.tags.language === defaultAudioTrack.tags.language);
+      const audioSurroundTrack = audioTracks.find(a => a.channels > 2 && a.tags.language === defaultAudioTrack.tags.language);
 
-      const firstAudioTrack = audioNormalTrack || audioSurroundTrack;
+      const firstAudioTrack = audioNormalTrack || audioSurroundTrack || defaultAudioTrack;
       const secondAudioTrack = audioSurroundTrack;
 
       this.logger.info(`Audio track index ${firstAudioTrack.index}`);
@@ -953,6 +954,8 @@ export class VideoService {
       job.discard();
     if (options.discard || job.attemptsMade >= job.opts.attempts)
       await this.videoResultQueue.add('failed-encoding', status);
+    else if (job.attemptsMade < job.opts.attempts)
+      await this.videoResultQueue.add('retry-encoding', status);
     return status;
   }
 
