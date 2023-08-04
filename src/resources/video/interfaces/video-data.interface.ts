@@ -14,6 +14,7 @@ export interface IVideoData {
   //av1Params: string;
   //qualityList: number[];
   //encodingSettings: IEncodingSetting[];
+  advancedOptions: IAdvancedOptions;
   isPrimary: boolean;
   user: string;
   update?: boolean;
@@ -27,4 +28,8 @@ export interface IEncodingSetting {
   maxrate: number;
   bufsize: number;
   useLowerRate: boolean;
+}
+
+export interface IAdvancedOptions {
+  selectAudioTracks?: number[];
 }

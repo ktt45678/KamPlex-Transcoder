@@ -208,13 +208,14 @@ export class VideoService {
     // Skip audio encoding for other codecs
     if (codec === VideoCodec.H264) {
       this.logger.info('Processing audio');
-
       const defaultAudioTrack = audioTracks.find(a => a.disposition.default) || audioTracks[0];
-      const audioNormalTrack = audioTracks.find(a => a.channels <= 2 && a.tags.language === defaultAudioTrack.tags.language);
-      const audioSurroundTrack = audioTracks.find(a => a.channels > 2 && a.tags.language === defaultAudioTrack.tags.language);
+      const allowedAudioTracks = job.data.advancedOptions?.selectAudioTracks || [defaultAudioTrack.index];
+
+      const audioNormalTrack = audioTracks.find(a => a.channels <= 2 && allowedAudioTracks.includes(a.index));
+      const audioSurroundTrack = audioTracks.find(a => a.channels > 2 && allowedAudioTracks.includes(a.index));
 
       const firstAudioTrack = audioNormalTrack || audioSurroundTrack || defaultAudioTrack;
-      const secondAudioTrack = audioSurroundTrack;
+      const secondAudioTrack = audioSurroundTrack || defaultAudioTrack;
 
       this.logger.info(`Audio track index ${firstAudioTrack.index}`);
       try {
