@@ -33,7 +33,7 @@ export class KamplexApiService {
       }
       try {
         const response = await firstValueFrom(this.httpService.get(url, {
-          headers: { 'Content-Type': 'application/json' }
+          headers: { 'Content-Type': 'application/json' }, family: 4
         }));
         this.logger.info(`GET ${url}: ${response.status}`);
         return true;

@@ -18,7 +18,6 @@ export async function hasFreeSpaceToCopyFile(filePath: string) {
       return false;
     return true;
   } catch (err) {
-    console.log(err);
     return false;
   }
 }

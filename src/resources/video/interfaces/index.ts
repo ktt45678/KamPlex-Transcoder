@@ -1,3 +1,5 @@
+export * from './encode-audio-options.interface';
+export * from './encode-video-options.interface';
 export * from './input-audio-args.interface';
 export * from './job-data.interface';
 export * from './media-queue-result.interface';

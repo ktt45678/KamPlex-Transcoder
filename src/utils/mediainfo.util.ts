@@ -54,6 +54,12 @@ export function createH264Params(encodedLibrarySettings: string, sameRes: boolea
   return filteredList.join(':');
 }
 
+export function isHDRVideo(colorSpace: string, colorTransfer: string, colorPrimaries: string) {
+  if (colorSpace === 'bt2020nc' && colorTransfer === 'smpte2084' && colorPrimaries === 'bt2020')
+    return true;
+  return false;
+}
+
 export interface MediaInfoResult {
   creatingLibrary: CreatingLibraryInfo;
   media: MediaInfoData;

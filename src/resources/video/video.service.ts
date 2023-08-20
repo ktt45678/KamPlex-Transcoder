@@ -13,7 +13,7 @@ import { Logger } from 'winston';
 import { externalStorageModel } from '../../models/external-storage.model';
 import { mediaStorageModel } from '../../models/media-storage.model';
 import { settingModel } from '../../models/setting.model';
-import { IVideoData, IJobData, IStorage, ISourceInfo, ISourceAudioInfo, IEncodingSetting, MediaQueueResult } from './interfaces';
+import { IVideoData, IJobData, IStorage, IEncodingSetting, MediaQueueResult, EncodeAudioOptions, EncodeVideoOptions, VideoSourceInfo, CreateAudioEncodingArgsOptions, CreateVideoEncodingArgsOptions } from './interfaces';
 import { AudioCodec, StatusCode, VideoCodec, RejectCode, TaskQueue } from '../../enums';
 import { ENCODING_QUALITY, AUDIO_PARAMS, AUDIO_SURROUND_PARAMS, VIDEO_H264_PARAMS, VIDEO_VP9_PARAMS, VIDEO_AV1_PARAMS, AUDIO_SPEED_PARAMS, AUDIO_SURROUND_OPUS_PARAMS } from '../../config';
 import { RcloneFile } from '../../common/interfaces';
@@ -69,7 +69,7 @@ export class VideoService {
     }
 
     // Connect to MongoDB
-    await mongoose.connect(this.configService.get<string>('DATABASE_URL'));
+    await mongoose.connect(this.configService.get<string>('DATABASE_URL'), { family: 4 });
     const appSettings = await settingModel.findOne({}).lean().exec();
 
     const audioParams = appSettings.audioParams ? appSettings.audioParams.split(' ') : this.AudioParams;
@@ -209,13 +209,13 @@ export class VideoService {
     if (codec === VideoCodec.H264) {
       this.logger.info('Processing audio');
       const defaultAudioTrack = audioTracks.find(a => a.disposition.default) || audioTracks[0];
-      const allowedAudioTracks = job.data.advancedOptions?.selectAudioTracks || [defaultAudioTrack.index];
+      const allowedAudioTracks = [defaultAudioTrack.index, ...(job.data.advancedOptions?.selectAudioTracks || [])];
 
       const audioNormalTrack = audioTracks.find(a => a.channels <= 2 && allowedAudioTracks.includes(a.index));
       const audioSurroundTrack = audioTracks.find(a => a.channels > 2 && allowedAudioTracks.includes(a.index));
 
       const firstAudioTrack = audioNormalTrack || audioSurroundTrack || defaultAudioTrack;
-      const secondAudioTrack = audioSurroundTrack || defaultAudioTrack;
+      const secondAudioTrack = audioSurroundTrack;
 
       this.logger.info(`Audio track index ${firstAudioTrack.index}`);
       try {
@@ -223,11 +223,17 @@ export class VideoService {
         const audioDuration = firstAudioTrack.duration ? Math.trunc(+firstAudioTrack.duration) : 0;
         const audioChannels = firstAudioTrack.channels || 2;
         const downmix = audioChannels > 2;
-        await this.encodeAudio(inputFile, parsedInput, { audioDuration, audioChannels }, firstAudioTrack.index, AudioCodec.AAC,
-          true, downmix, audioParams, manifest, job);
+        await this.encodeAudio({
+          inputFile, parsedInput, sourceInfo: { duration: audioDuration, channels: audioChannels },
+          audioTrackIndex: firstAudioTrack.index, codec: AudioCodec.AAC, isDefault: true,
+          downmix, audioParams, manifest, job
+        });
         this.logger.info('Audio codec: OPUS');
-        await this.encodeAudio(inputFile, parsedInput, { audioDuration, audioChannels }, firstAudioTrack.index, AudioCodec.OPUS,
-          false, downmix, audioSpeedParams, manifest, job);
+        await this.encodeAudio({
+          inputFile, parsedInput, sourceInfo: { duration: audioDuration, channels: audioChannels },
+          audioTrackIndex: firstAudioTrack.index, codec: AudioCodec.OPUS, isDefault: false,
+          downmix, audioParams: audioSpeedParams, manifest, job
+        });
       } catch (e) {
         this.logger.error(JSON.stringify(e));
         await deleteFolder(transcodeDir);
@@ -246,13 +252,19 @@ export class VideoService {
           this.logger.info('Audio codec: AAC Surround');
           const audioDuration = secondAudioTrack.duration ? Math.trunc(+secondAudioTrack.duration) : 0;
           const audioChannels = secondAudioTrack.channels || 0;
-          await this.encodeAudio(inputFile, parsedInput, { audioDuration, audioChannels }, secondAudioTrack.index,
-            AudioCodec.AAC_SURROUND, false, false, audioSurroundParams, manifest, job);
+          await this.encodeAudio({
+            inputFile, parsedInput, sourceInfo: { duration: audioDuration, channels: audioChannels },
+            audioTrackIndex: secondAudioTrack.index, codec: AudioCodec.AAC_SURROUND, isDefault: false, downmix: false,
+            audioParams: audioSurroundParams, manifest, job
+          });
           // Only encode opus surround if the source audio has 6 (5.1) or 8 (7.1) channels
           if ([6, 8].includes(audioChannels)) {
             this.logger.info('Audio codec: OPUS Surround');
-            await this.encodeAudio(inputFile, parsedInput, { audioDuration, audioChannels }, secondAudioTrack.index,
-              AudioCodec.OPUS_SURROUND, false, false, audioSurroundOpusParams, manifest, job);
+            await this.encodeAudio({
+              inputFile, parsedInput, sourceInfo: { duration: audioDuration, channels: audioChannels },
+              audioTrackIndex: secondAudioTrack.index, codec: AudioCodec.OPUS_SURROUND, isDefault: false, downmix: false,
+              audioParams: audioSurroundOpusParams, manifest, job
+            });
           }
         } catch (e) {
           this.logger.error(JSON.stringify(e));
@@ -268,24 +280,30 @@ export class VideoService {
     }
 
     try {
-      const sourceInfo: ISourceInfo = {
-        videoDuration, videoFps, videoBitrate, videoCodec, videoSourceH264Params,
-        videoQuality: srcHeight
+      const sourceInfo: VideoSourceInfo = {
+        duration: videoDuration, fps: videoFps, bitrate: videoBitrate, codec: videoCodec, sourceH264Params: videoSourceH264Params,
+        quality: srcHeight
       };
       if (codec === VideoCodec.H264) {
         this.logger.info('Video codec: H264');
-        await this.encodeByCodec(inputFile, parsedInput, sourceInfo,
-          availableQualityList, encodingSettings, VideoCodec.H264, videoH264Params, manifest, job);
+        await this.encodeByCodec({
+          inputFile, parsedInput, sourceInfo, qualityList: availableQualityList, encodingSettings,
+          advancedSettings: job.data.advancedOptions, codec: VideoCodec.H264, videoParams: videoH264Params, manifest, job
+        });
       }
       else if (codec === VideoCodec.VP9) {
         this.logger.info('Video codec: VP9');
-        await this.encodeByCodec(inputFile, parsedInput, sourceInfo,
-          availableQualityList, encodingSettings, VideoCodec.VP9, videoVP9Params, manifest, job);
+        await this.encodeByCodec({
+          inputFile, parsedInput, sourceInfo, qualityList: availableQualityList, encodingSettings,
+          advancedSettings: job.data.advancedOptions, codec: VideoCodec.VP9, videoParams: videoVP9Params, manifest, job
+        });
       }
       else if (codec === VideoCodec.AV1) {
         this.logger.info('Video codec: AV1');
-        await this.encodeByCodec(inputFile, parsedInput, sourceInfo,
-          availableQualityList, encodingSettings, VideoCodec.AV1, videoAV1Params, manifest, job);
+        await this.encodeByCodec({
+          inputFile, parsedInput, sourceInfo, qualityList: availableQualityList, encodingSettings,
+          advancedSettings: job.data.advancedOptions, codec: VideoCodec.AV1, videoParams: videoAV1Params, manifest, job
+        });
       }
       // Generate preview thumbnail
       this.logger.info(`Generating preview thumbnail: ${inputFile}`);
@@ -352,18 +370,19 @@ export class VideoService {
     return job.data;
   }
 
-  private async encodeAudio(inputFile: string, parsedInput: path.ParsedPath, sourceInfo: ISourceAudioInfo, audioTrackIndex: number,
-    codec: number, isDefault: boolean, downmix: boolean, audioParams: string[], manifest: StreamManifest, job: Job<IVideoData>) {
-    const { audioDuration, audioChannels } = sourceInfo;
+  private async encodeAudio(options: EncodeAudioOptions) {
+    const { inputFile, parsedInput, sourceInfo, audioTrackIndex, codec, isDefault, downmix, audioParams, manifest, job } = options;
     const streamId = await createSnowFlakeId();
-    const audioArgs = this.createAudioEncodingArgs(inputFile, parsedInput, audioParams, codec, audioChannels, downmix,
-      audioTrackIndex);
+    const audioArgs = this.createAudioEncodingArgs({
+      inputFile, parsedInput, audioParams, codec, channels: sourceInfo.channels,
+      downmix, audioIndex: audioTrackIndex
+    });
     const audioBaseName = `${parsedInput.name}_audio_${audioTrackIndex}`;
     const audioFileName = `${audioBaseName}.mp4`;
     const manifestFileName = `${audioBaseName}.m3u8`;
     const mpdManifestFileName = `${audioBaseName}.mpd`;
     const playlistFileName = `${audioBaseName}_1.m3u8`;
-    await this.encodeMedia(audioArgs, audioDuration, job.id);
+    await this.encodeMedia(audioArgs, sourceInfo.duration, job.id);
 
     await this.prepareMediaFile(audioFileName, parsedInput, `${audioBaseName}_temp`, manifestFileName, job);
 
@@ -405,10 +424,19 @@ export class VideoService {
     });
   }
 
-  private async encodeByCodec(inputFile: string, parsedInput: path.ParsedPath,
-    sourceInfo: ISourceInfo, qualityList: number[], encodingSettings: IEncodingSetting[], codec: number, videoParams: string[],
-    manifest: StreamManifest, job: Job<IVideoData>) {
-    const { videoDuration } = sourceInfo;
+  private async encodeByCodec(options: EncodeVideoOptions) {
+    const {
+      inputFile, parsedInput, sourceInfo, qualityList, encodingSettings, advancedSettings = {}, codec, videoParams,
+      manifest, job
+    } = options;
+    // Merge default encoding settings with override settings
+    if (advancedSettings.overrideSettings) {
+      advancedSettings.overrideSettings.forEach(os => {
+        const qualitySettings = encodingSettings.find(s => s.quality === os.quality);
+        if (qualitySettings)
+          Object.assign(qualitySettings, os);
+      });
+    }
     for (let i = 0; i < qualityList.length; i++) {
       this.logger.info(`Processing video quality: ${qualityList[i]}`);
       const streamId = await createSnowFlakeId();
@@ -420,19 +448,25 @@ export class VideoService {
       const playlistFileName = `${videoBaseName}_1.m3u8`;
       try {
         if (codec === VideoCodec.H264) {
-          const videoArgs = this.createVideoEncodingArgs(inputFile, parsedInput, codec, qualityList[i], videoParams,
-            sourceInfo, 'crf', perQualitySettings);
-          await this.encodeMedia(videoArgs, videoDuration, job.id);
+          const videoArgs = this.createVideoEncodingArgs({
+            inputFile, parsedInput, codec, quality: qualityList[i], videoParams,
+            sourceInfo, crfKey: 'crf', advancedSettings, encodingSetting: perQualitySettings
+          });
+          await this.encodeMedia(videoArgs, sourceInfo.duration, job.id);
         } else {
           // Pass 1 params
-          const videoPass1Args = this.createTwoPassesVideoEncodingArgs(inputFile, parsedInput, codec, qualityList[i],
-            videoParams, sourceInfo, 'cq', 1, perQualitySettings);
+          const videoPass1Args = this.createTwoPassesVideoEncodingArgs({
+            inputFile, parsedInput, codec, quality: qualityList[i], videoParams,
+            sourceInfo, crfKey: 'cq', advancedSettings, encodingSetting: perQualitySettings, pass: 1
+          });
           // Pass 2 params
-          const videoPass2Args = this.createTwoPassesVideoEncodingArgs(inputFile, parsedInput, codec, qualityList[i],
-            videoParams, sourceInfo, 'cq', 2, perQualitySettings);
+          const videoPass2Args = this.createTwoPassesVideoEncodingArgs({
+            inputFile, parsedInput, codec, quality: qualityList[i], videoParams,
+            sourceInfo, crfKey: 'cq', advancedSettings, encodingSetting: perQualitySettings, pass: 2
+          });
 
-          await this.encodeMedia(videoPass1Args, videoDuration, job.id);
-          await this.encodeMedia(videoPass2Args, videoDuration, job.id);
+          await this.encodeMedia(videoPass1Args, sourceInfo.duration, job.id);
+          await this.encodeMedia(videoPass2Args, sourceInfo.duration, job.id);
         }
 
         await this.prepareMediaFile(videoFileName, parsedInput, `${videoBaseName}_temp`, manifestFileName, job);
@@ -536,8 +570,8 @@ export class VideoService {
     });
   }
 
-  private createAudioEncodingArgs(inputFile: string, parsedInput: path.ParsedPath, audioParams: string[],
-    codec: number, channels: number, downmix: boolean, audioIndex: number) {
+  private createAudioEncodingArgs(options: CreateAudioEncodingArgsOptions) {
+    const { inputFile, parsedInput, audioParams, codec, channels, downmix, audioIndex } = options;
     const bitrate = AudioCodec.OPUS === codec ? 128 : AudioCodec.OPUS_SURROUND === codec ? 64 * channels : 0;
     const args: string[] = [
       '-hide_banner', '-y',
@@ -574,10 +608,9 @@ export class VideoService {
     return args;
   }
 
-  private createVideoEncodingArgs(inputFile: string, parsedInput: path.ParsedPath,
-    codec: number, quality: number, videoParams: string[], sourceInfo: ISourceInfo, crfKey: 'crf' | 'cq',
-    encodingSetting?: IEncodingSetting) {
-    const gopSize = (sourceInfo.videoFps ? sourceInfo.videoFps * 2 : 48).toString();
+  private createVideoEncodingArgs(options: CreateVideoEncodingArgsOptions) {
+    const { inputFile, parsedInput, codec, quality, videoParams, sourceInfo, crfKey, advancedSettings, encodingSetting } = options;
+    const gopSize = (sourceInfo.fps ? sourceInfo.fps * 2 : 48).toString();
     const args: string[] = [
       '-hide_banner', '-y',
       '-progress', 'pipe:1',
@@ -590,9 +623,14 @@ export class VideoService {
     ];
     if (encodingSetting)
       this.resolveEncodingSettings(args, encodingSetting, sourceInfo, crfKey);
-    if (codec === VideoCodec.H264 && sourceInfo.videoSourceH264Params) {
-      const x264Params = createH264Params(sourceInfo.videoSourceH264Params, sourceInfo.videoQuality === quality);
-      args.push('-x264-params', `"${x264Params}"`);
+    if (codec === VideoCodec.H264) {
+      if (advancedSettings.h264Tune) {
+        args.push('-tune', advancedSettings.h264Tune);
+      }
+      if (sourceInfo.sourceH264Params) {
+        const x264Params = createH264Params(sourceInfo.sourceH264Params, sourceInfo.quality === quality);
+        args.push('-x264-params', `"${x264Params}"`);
+      }
     }
     args.push(
       '-map', '0:v:0',
@@ -606,10 +644,9 @@ export class VideoService {
     return args;
   }
 
-  private createTwoPassesVideoEncodingArgs(inputFile: string, parsedInput: path.ParsedPath,
-    codec: number, quality: number, videoParams: string[], sourceInfo: ISourceInfo, crfKey: 'crf' | 'cq', pass: number = 1,
-    encodingSetting?: IEncodingSetting) {
-    const gopSize = (sourceInfo.videoFps ? sourceInfo.videoFps * 2 : 48).toString();
+  private createTwoPassesVideoEncodingArgs(options: CreateVideoEncodingArgsOptions & { pass: number }) {
+    const { inputFile, parsedInput, codec, quality, videoParams, sourceInfo, crfKey, encodingSetting, pass } = options;
+    const gopSize = (sourceInfo.fps ? sourceInfo.fps * 2 : 48).toString();
     if (pass === 1) {
       const outputName = process.platform === 'win32' ? 'NUL' : '/dev/null';
       const args = [
@@ -624,8 +661,8 @@ export class VideoService {
       ];
       if (encodingSetting)
         this.resolveEncodingSettings(args, encodingSetting, sourceInfo, crfKey);
-      if (codec === VideoCodec.H264 && sourceInfo.videoSourceH264Params) {
-        const x264Params = createH264Params(sourceInfo.videoSourceH264Params, sourceInfo.videoQuality === quality);
+      if (codec === VideoCodec.H264 && sourceInfo.sourceH264Params) {
+        const x264Params = createH264Params(sourceInfo.sourceH264Params, sourceInfo.quality === quality);
         args.push('-x264-params', `"${x264Params}"`);
       }
       args.push(
@@ -650,8 +687,8 @@ export class VideoService {
     ];
     if (encodingSetting)
       this.resolveEncodingSettings(args, encodingSetting, sourceInfo, crfKey);
-    if (codec === VideoCodec.H264 && sourceInfo.videoSourceH264Params) {
-      const x264Params = createH264Params(sourceInfo.videoSourceH264Params, sourceInfo.videoQuality === quality);
+    if (codec === VideoCodec.H264 && sourceInfo.sourceH264Params) {
+      const x264Params = createH264Params(sourceInfo.sourceH264Params, sourceInfo.quality === quality);
       args.push('-x264-params', `"${x264Params}"`);
     }
     args.push(
@@ -668,12 +705,12 @@ export class VideoService {
     return args;
   }
 
-  private resolveEncodingSettings(args: string[], encodingSetting: IEncodingSetting, sourceInfo: ISourceInfo,
+  private resolveEncodingSettings(args: string[], encodingSetting: IEncodingSetting, sourceInfo: VideoSourceInfo,
     crfKey: 'crf' | 'cq' = 'crf') {
     const crfValue = crfKey === 'crf' ? encodingSetting.crf : encodingSetting.cq;
     crfValue && args.push('-crf', crfValue.toString());
     // Should double the bitrate when the source codec isn't h264 (could be h265, vp9 or av1)
-    const baseBitrate = sourceInfo.videoCodec === 'h264' ? sourceInfo.videoBitrate : sourceInfo.videoBitrate * 2;
+    const baseBitrate = sourceInfo.codec === 'h264' ? sourceInfo.bitrate : sourceInfo.bitrate * 2;
     if (encodingSetting.useLowerRate && baseBitrate > 0 && baseBitrate < encodingSetting.maxrate) {
       encodingSetting.maxrate && args.push('-maxrate', `${baseBitrate}K`);
       encodingSetting.bufsize && args.push('-bufsize', `${baseBitrate * 2}K`);
@@ -891,7 +928,7 @@ export class VideoService {
         continue;
       fileIds.push(BigInt(stringId));
     }
-    await mongoose.connect(this.configService.get<string>('DATABASE_URL'));
+    await mongoose.connect(this.configService.get<string>('DATABASE_URL'), { family: 4 });
     const fileList = await mediaStorageModel.find({ _id: { $in: fileIds }, codec }).lean().exec();
     await mongoose.disconnect();
     const qualityList = fileList.map(file => file.quality);
