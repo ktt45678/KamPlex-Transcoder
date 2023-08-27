@@ -1,8 +1,10 @@
 import { DateTime } from 'luxon';
 import child_process from 'child_process';
+import path from 'path';
 
 import { IStorage } from '../resources/video/interfaces/storage.interface';
 import { RcloneFile } from '../common/interfaces';
+import { escapeRegExp } from './string-helper.util';
 
 export function createRcloneConfig(storage: IStorage) {
   const token = JSON.stringify({
@@ -23,20 +25,27 @@ export function createRcloneConfig(storage: IStorage) {
   newConfig += `token = ${token}\n`;
   if (storage.kind === 3) {
     newConfig += `root_folder_id = ${storage.folderId}\n\n`;
-  } else {
-    newConfig += `drive_id = ${storage.folderId}\n`;
+  }
+  if (storage.kind === 6) {
+    const [driveId, folderId] = storage.folderId.split('#');
+    folderId && (newConfig += `root_folder_id = ${storage.folderId}\n`);
+    newConfig += `drive_id = ${driveId}\n`;
     newConfig += 'drive_type = business\n\n';
   }
   return newConfig;
 }
 
 export function downloadFile(configPath: string, rcloneDir: string, remote: string, folder: string, file: string,
-  saveFolder: string, logFn: (args: string[]) => void) {
+  saveFolder: string, useFilter: boolean, logFn: (args: string[]) => void) {
+  const filePath = path.posix.join(folder, file);
+  const copyArgs = useFilter ?
+    [`"${remote}:${folder}"`, saveFolder, '--include', `"${escapeRegExp(file)}"`] :
+    [`"${remote}:${filePath}"`, saveFolder];
   const args: string[] = [
     '--ignore-checksum',
     '--config', `"${configPath}"`,
-    'copy', `${remote}:${folder}/${file}`,
-    saveFolder
+    '--low-level-retries', '5',
+    'copy', ...copyArgs
   ];
   logFn(args);
   //console.log('\x1b[36m%s\x1b[0m', 'rclone ' + args.join(' '));
@@ -146,6 +155,25 @@ export function isPathExist(configPath: string, rcloneDir: string, remote: strin
     '--config', `"${configPath}"`,
     '--low-level-retries', '1',
     'lsd', `${remote}:${path}`
+  ];
+  //console.log('\x1b[36m%s\x1b[0m', 'rclone ' + args.join(' '));
+  return new Promise<boolean>((resolve) => {
+    const rclone = child_process.spawn(`"${rcloneDir}/rclone"`, args, { shell: true });
+    rclone.on('exit', (code: number) => {
+      if (code !== 0) {
+        resolve(false);
+      } else {
+        resolve(true);
+      }
+    });
+  });
+}
+
+export function mkdirRemote(configPath: string, rcloneDir: string, remote: string, path: string) {
+  const args: string[] = [
+    '--config', `"${configPath}"`,
+    '--low-level-retries', '5',
+    'mkdir', `${remote}:${path}`
   ];
   //console.log('\x1b[36m%s\x1b[0m', 'rclone ' + args.join(' '));
   return new Promise<boolean>((resolve) => {

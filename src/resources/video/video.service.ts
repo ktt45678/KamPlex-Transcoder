@@ -13,15 +13,15 @@ import { Logger } from 'winston';
 import { externalStorageModel } from '../../models/external-storage.model';
 import { mediaStorageModel } from '../../models/media-storage.model';
 import { settingModel } from '../../models/setting.model';
-import { IVideoData, IJobData, IStorage, IEncodingSetting, MediaQueueResult, EncodeAudioOptions, EncodeVideoOptions, VideoSourceInfo, CreateAudioEncodingArgsOptions, CreateVideoEncodingArgsOptions } from './interfaces';
+import { IVideoData, IJobData, IStorage, IEncodingSetting, MediaQueueResult, EncodeAudioOptions, EncodeVideoOptions, VideoSourceInfo, CreateAudioEncodingArgsOptions, CreateVideoEncodingArgsOptions, EncodeAudioByTrackOptions } from './interfaces';
 import { AudioCodec, StatusCode, VideoCodec, RejectCode, TaskQueue } from '../../enums';
 import { ENCODING_QUALITY, AUDIO_PARAMS, AUDIO_SURROUND_PARAMS, VIDEO_H264_PARAMS, VIDEO_VP9_PARAMS, VIDEO_AV1_PARAMS, AUDIO_SPEED_PARAMS, AUDIO_SURROUND_OPUS_PARAMS } from '../../config';
 import { RcloneFile } from '../../common/interfaces';
 import { KamplexApiService } from '../../common/modules/kamplex-api';
 import {
   createRcloneConfig, downloadFile, renameFile, deleteFile, deletePath, createSnowFlakeId, divideFromString, findInFile,
-  appendToFile, fileExists, deleteFolder, generateSprites, parseProgress, progressPercent, MediaInfoResult, StringCrypto,
-  getMediaInfo, createH264Params, StreamManifest, hasFreeSpaceToCopyFile
+  appendToFile, deleteFolder, generateSprites, parseProgress, progressPercent, MediaInfoResult, StringCrypto,
+  getMediaInfo, createH264Params, StreamManifest, hasFreeSpaceToCopyFile, trimSlugFilename, statFile, mkdirRemote
 } from '../../utils';
 
 type JobNameType = 'update-source' | 'add-stream-video' | 'add-stream-audio' | 'add-stream-manifest' | 'finished-encoding' |
@@ -87,22 +87,13 @@ export class VideoService {
     const transcodeDir = `${this.configService.get<string>('TRANSCODE_DIR')}/${job.id}`;
     const ffmpegDir = this.configService.get<string>('FFMPEG_DIR');
     const mediainfoDir = this.configService.get<string>('MEDIAINFO_DIR');
-    const inputFile = `${transcodeDir}/${job.data.filename}`;
+    const trimmedFileName = job.data.linkedStorage ? trimSlugFilename(job.data.filename) : job.data.filename; // Trim saved file name
+    const inputFile = `${transcodeDir}/${trimmedFileName}`;
     const parsedInput = path.parse(inputFile);
 
-    const configExists = await findInFile(rcloneConfigFile, `[${job.data.storage}]`);
-    if (!configExists) {
-      this.logger.info(`Config for remote "${job.data.storage}" not found, generating...`);
-      let externalStorage = await externalStorageModel.findOne({ _id: BigInt(job.data.storage) }).lean().exec();
-      if (!externalStorage) {
-        const statusError = await this.generateStatusError(StatusCode.STORAGE_NOT_FOUND, job);
-        throw new Error(statusError.errorCode);
-      }
-      externalStorage = await this.decryptToken(externalStorage);
-      const newConfig = createRcloneConfig(externalStorage);
-      await appendToFile(rcloneConfigFile, newConfig);
-      this.logger.info(`Generated config for remote "${job.data.storage}"`);
-    }
+    await this.ensureRcloneConfigExist(rcloneConfigFile, job.data.storage, job);
+    if (job.data.linkedStorage)
+      await this.ensureRcloneConfigExist(rcloneConfigFile, job.data.linkedStorage, job);
 
     let availableQualityList: number[] | null = null;
     // Find and validate source quality if the quality is available on db
@@ -125,11 +116,23 @@ export class VideoService {
 
     this.logger.info(`Downloading file from media id: ${job.data._id}`);
     try {
-      const isFileExists = await fileExists(inputFile);
-      if (!isFileExists)
-        await downloadFile(rcloneConfigFile, rcloneDir, job.data.storage, job.data._id, job.data.filename, transcodeDir, (args => {
-          this.logger.info('rclone ' + args.join(' '));
-        }));
+      const downloadedFileStats = await statFile(inputFile);
+      if (!downloadedFileStats || downloadedFileStats.size !== job.data.size) {
+        if (downloadedFileStats)
+          await deleteFile(inputFile); // Delete file if exist
+        const downloadStorage = job.data.linkedStorage || job.data.storage;
+        await downloadFile(rcloneConfigFile, rcloneDir, downloadStorage, job.data.path, job.data.filename, transcodeDir,
+          !!job.data.linkedStorage, (args => {
+            this.logger.info('rclone ' + args.join(' '));
+          }));
+        if (job.data.linkedStorage) {
+          // Trim file name and create folder on remote
+          await Promise.all([
+            renameFile(`${transcodeDir}/${job.data.filename}`, inputFile),
+            mkdirRemote(rcloneConfigFile, rcloneDir, job.data.storage, job.data._id)
+          ]);
+        }
+      }
     } catch (e) {
       this.logger.error(e);
       await deleteFolder(transcodeDir);
@@ -209,31 +212,56 @@ export class VideoService {
     if (codec === VideoCodec.H264) {
       this.logger.info('Processing audio');
       const defaultAudioTrack = audioTracks.find(a => a.disposition.default) || audioTracks[0];
-      const allowedAudioTracks = [defaultAudioTrack.index, ...(job.data.advancedOptions?.selectAudioTracks || [])];
+      const allowedAudioTracks = [...new Set(job.data.advancedOptions?.selectAudioTracks || []).add(defaultAudioTrack.index)];
 
       const audioNormalTrack = audioTracks.find(a => a.channels <= 2 && allowedAudioTracks.includes(a.index));
       const audioSurroundTrack = audioTracks.find(a => a.channels > 2 && allowedAudioTracks.includes(a.index));
+      const audioPrimaryTracks = [audioNormalTrack, audioSurroundTrack].filter(a => a != null);
+      const audioExtraTracks = audioTracks.filter(a => !audioPrimaryTracks.includes(a) && allowedAudioTracks.includes(a.index));
 
       const firstAudioTrack = audioNormalTrack || audioSurroundTrack || defaultAudioTrack;
       const secondAudioTrack = audioSurroundTrack;
 
-      this.logger.info(`Audio track index ${firstAudioTrack.index}`);
       try {
-        this.logger.info('Audio codec: AAC');
-        const audioDuration = firstAudioTrack.duration ? Math.trunc(+firstAudioTrack.duration) : 0;
-        const audioChannels = firstAudioTrack.channels || 2;
-        const downmix = audioChannels > 2;
-        await this.encodeAudio({
-          inputFile, parsedInput, sourceInfo: { duration: audioDuration, channels: audioChannels },
-          audioTrackIndex: firstAudioTrack.index, codec: AudioCodec.AAC, isDefault: true,
-          downmix, audioParams, manifest, job
+        // Encode surround audio track
+        if (secondAudioTrack != null) {
+          this.logger.info(`Audio track index ${secondAudioTrack.index} (surround)`);
+          await this.encodeAudioByTrack({
+            inputFile, parsedInput, type: 'surround', audioTrack: secondAudioTrack, audioAACParams: audioSurroundParams,
+            audioOpusParams: audioSurroundOpusParams, isDefault: true, downmix: false, manifest, job
+          });
+        }
+        // Encode stereo or mono audio track
+        this.logger.info(`Audio track index ${firstAudioTrack.index} (normal)`);
+        await this.encodeAudioByTrack({
+          inputFile, parsedInput, type: 'normal', audioTrack: firstAudioTrack, audioAACParams: audioParams,
+          audioOpusParams: audioSpeedParams, isDefault: !secondAudioTrack, downmix: firstAudioTrack.channels > 2, manifest, job
         });
-        this.logger.info('Audio codec: OPUS');
-        await this.encodeAudio({
-          inputFile, parsedInput, sourceInfo: { duration: audioDuration, channels: audioChannels },
-          audioTrackIndex: firstAudioTrack.index, codec: AudioCodec.OPUS, isDefault: false,
-          downmix, audioParams: audioSpeedParams, manifest, job
-        });
+        // this.logger.info('Audio codec: AAC');
+        // const audioDuration = firstAudioTrack.duration ? Math.trunc(+firstAudioTrack.duration) : 0;
+        // const audioChannels = firstAudioTrack.channels || 2;
+        // const downmix = audioChannels > 2;
+        // await this.encodeAudio({
+        //   inputFile, parsedInput, sourceInfo: { duration: audioDuration, channels: audioChannels },
+        //   audioTrackIndex: firstAudioTrack.index, codec: AudioCodec.AAC, isDefault: true,
+        //   downmix, audioParams, manifest, job
+        // });
+        // this.logger.info('Audio codec: OPUS');
+        // await this.encodeAudio({
+        //   inputFile, parsedInput, sourceInfo: { duration: audioDuration, channels: audioChannels },
+        //   audioTrackIndex: firstAudioTrack.index, codec: AudioCodec.OPUS, isDefault: false,
+        //   downmix, audioParams: audioSpeedParams, manifest, job
+        // });
+        // Encode any others audio tracks
+        for (let i = 0; i < audioExtraTracks.length; i++) {
+          const extraAudioTrack = audioExtraTracks[i];
+          const extraTrackLang = extraAudioTrack.tags?.language || 'N/A';
+          this.logger.info(`Audio track index ${extraAudioTrack.index} (others, language: ${extraTrackLang})`);
+          await this.encodeAudioByTrack({
+            inputFile, parsedInput, type: 'normal', audioTrack: extraAudioTrack, audioAACParams: audioParams,
+            audioOpusParams: audioSpeedParams, isDefault: false, downmix: extraAudioTrack.channels > 2, manifest, job
+          });
+        }
       } catch (e) {
         this.logger.error(JSON.stringify(e));
         await deleteFolder(transcodeDir);
@@ -246,37 +274,37 @@ export class VideoService {
       }
 
       // Encode surround audio track
-      if (secondAudioTrack != null) {
-        this.logger.info(`Audio track index ${secondAudioTrack.index}`);
-        try {
-          this.logger.info('Audio codec: AAC Surround');
-          const audioDuration = secondAudioTrack.duration ? Math.trunc(+secondAudioTrack.duration) : 0;
-          const audioChannels = secondAudioTrack.channels || 0;
-          await this.encodeAudio({
-            inputFile, parsedInput, sourceInfo: { duration: audioDuration, channels: audioChannels },
-            audioTrackIndex: secondAudioTrack.index, codec: AudioCodec.AAC_SURROUND, isDefault: false, downmix: false,
-            audioParams: audioSurroundParams, manifest, job
-          });
-          // Only encode opus surround if the source audio has 6 (5.1) or 8 (7.1) channels
-          if ([6, 8].includes(audioChannels)) {
-            this.logger.info('Audio codec: OPUS Surround');
-            await this.encodeAudio({
-              inputFile, parsedInput, sourceInfo: { duration: audioDuration, channels: audioChannels },
-              audioTrackIndex: secondAudioTrack.index, codec: AudioCodec.OPUS_SURROUND, isDefault: false, downmix: false,
-              audioParams: audioSurroundOpusParams, manifest, job
-            });
-          }
-        } catch (e) {
-          this.logger.error(JSON.stringify(e));
-          await deleteFolder(transcodeDir);
-          if (e === RejectCode.JOB_CANCEL) {
-            this.logger.info(`Received cancel signal from job id: ${job.id}`);
-            return {};
-          }
-          const statusError = await this.generateStatusError(StatusCode.ENCODE_AUDIO_FAILED, job);
-          throw new Error(statusError.errorCode);
-        }
-      }
+      // if (secondAudioTrack != null) {
+      //   this.logger.info(`Audio track index ${secondAudioTrack.index}`);
+      //   try {
+      //     this.logger.info('Audio codec: AAC Surround');
+      //     const audioDuration = secondAudioTrack.duration ? Math.trunc(+secondAudioTrack.duration) : 0;
+      //     const audioChannels = secondAudioTrack.channels || 0;
+      //     await this.encodeAudio({
+      //       inputFile, parsedInput, sourceInfo: { duration: audioDuration, channels: audioChannels },
+      //       audioTrackIndex: secondAudioTrack.index, codec: AudioCodec.AAC_SURROUND, isDefault: false, downmix: false,
+      //       audioParams: audioSurroundParams, manifest, job
+      //     });
+      //     // Only encode opus surround if the source audio has 6 (5.1) or 8 (7.1) channels
+      //     if ([6, 8].includes(audioChannels)) {
+      //       this.logger.info('Audio codec: OPUS Surround');
+      //       await this.encodeAudio({
+      //         inputFile, parsedInput, sourceInfo: { duration: audioDuration, channels: audioChannels },
+      //         audioTrackIndex: secondAudioTrack.index, codec: AudioCodec.OPUS_SURROUND, isDefault: false, downmix: false,
+      //         audioParams: audioSurroundOpusParams, manifest, job
+      //       });
+      //     }
+      //   } catch (e) {
+      //     this.logger.error(JSON.stringify(e));
+      //     await deleteFolder(transcodeDir);
+      //     if (e === RejectCode.JOB_CANCEL) {
+      //       this.logger.info(`Received cancel signal from job id: ${job.id}`);
+      //       return {};
+      //     }
+      //     const statusError = await this.generateStatusError(StatusCode.ENCODE_AUDIO_FAILED, job);
+      //     throw new Error(statusError.errorCode);
+      //   }
+      // }
     }
 
     try {
@@ -334,8 +362,8 @@ export class VideoService {
       const checkFilesExclusion = `${this.thumbnailFolder}/**`;
       let uploadedFiles = await this.findUploadedFiles(job.data.storage, job.data._id, job.id, checkFilesExclusion);
       let listAttempt = 1;
-      // 1 source file, 3 audio files, and video files
-      const totalExpectedFiles = availableQualityList.length + 1 + 3;
+      // 1 source file (0 for linked source), 3 audio files, and video files
+      const totalExpectedFiles = availableQualityList.length + (job.data.linkedStorage ? 0 : 1) + 3;
       const maxTries = 5;
       while (uploadedFiles.length < totalExpectedFiles && listAttempt < maxTries) {
         uploadedFiles = await this.findUploadedFiles(job.data.storage, job.data._id, job.id, checkFilesExclusion);
@@ -368,6 +396,29 @@ export class VideoService {
     else if (job.data.ids)
       this.CanceledJobIds.push(...job.data.ids);
     return job.data;
+  }
+
+  private async encodeAudioByTrack(options: EncodeAudioByTrackOptions) {
+    const { inputFile, parsedInput, type, audioTrack, audioAACParams, audioOpusParams, isDefault, downmix, manifest, job } = options;
+    const aacType = type === 'normal' ? AudioCodec.AAC : AudioCodec.AAC_SURROUND;
+    const opusType = type === 'normal' ? AudioCodec.OPUS : AudioCodec.OPUS_SURROUND;
+    this.logger.info('Audio codec: AAC');
+    const audioDuration = audioTrack.duration ? Math.trunc(+audioTrack.duration) : 0;
+    const audioChannels = audioTrack.channels || (type === 'normal' ? 2 : 0);
+    await this.encodeAudio({
+      inputFile, parsedInput, sourceInfo: { duration: audioDuration, channels: audioChannels },
+      audioTrackIndex: audioTrack.index, codec: aacType, isDefault, downmix, audioParams: audioAACParams,
+      manifest, job
+    });
+    // Only encode opus surround if the source audio has 6 (5.1) or 8 (7.1) channels
+    if (type === 'normal' || [6, 8].includes(audioChannels)) {
+      this.logger.info('Audio codec: OPUS');
+      await this.encodeAudio({
+        inputFile, parsedInput, sourceInfo: { duration: audioDuration, channels: audioChannels },
+        audioTrackIndex: audioTrack.index, codec: opusType, isDefault: false, downmix, audioParams: audioOpusParams,
+        manifest, job
+      });
+    }
   }
 
   private async encodeAudio(options: EncodeAudioOptions) {
@@ -544,9 +595,12 @@ export class VideoService {
       this.logger.info(`Redownloading: ${job.data.filename}`);
       const rcloneDir = this.configService.get<string>('RCLONE_DIR');
       const rcloneConfigFile = this.configService.get<string>('RCLONE_CONFIG_FILE');
-      await downloadFile(rcloneConfigFile, rcloneDir, job.data.storage, job.data._id, job.data.filename, parsedInput.dir, (args => {
-        this.logger.info('rclone ' + args.join(' '));
-      }));
+      const downloadStorage = job.data.linkedStorage || job.data.storage;
+      await downloadFile(rcloneConfigFile, rcloneDir, downloadStorage, job.data._id, job.data.filename, parsedInput.dir,
+        !!job.data.linkedStorage,
+        (args => {
+          this.logger.info('rclone ' + args.join(' '));
+        }));
     }
   }
 
@@ -600,7 +654,7 @@ export class VideoService {
     }
     args.push(
       '-map', `0:${audioIndex}`,
-      '-map_metadata', '-1',
+      //'-map_metadata', '-1',
       '-map_chapters', '-1',
       '-f', 'mp4',
       `"${parsedInput.dir}/${parsedInput.name}_audio_${audioIndex}.mp4"`
@@ -634,7 +688,7 @@ export class VideoService {
     }
     args.push(
       '-map', '0:v:0',
-      '-map_metadata', '-1',
+      //'-map_metadata', '-1',
       '-map_chapters', '-1',
       '-vf', `scale=-2:${quality}`,
       //'-movflags', '+faststart',
@@ -693,7 +747,7 @@ export class VideoService {
     }
     args.push(
       '-map', '0:v:0',
-      '-map_metadata', '-1',
+      //'-map_metadata', '-1',
       '-map_chapters', '-1',
       '-vf', `scale=-2:${quality}`,
       //'-movflags', '+faststart',
@@ -913,6 +967,22 @@ export class VideoService {
         }
       });
     });
+  }
+
+  private async ensureRcloneConfigExist(configFile: string, storage: string, job: Job<IVideoData>) {
+    const configExists = await findInFile(configFile, `[${storage}]`);
+    if (!configExists) {
+      this.logger.info(`Config for remote "${storage}" not found, generating...`);
+      let externalStorage = await externalStorageModel.findOne({ _id: BigInt(storage) }).lean().exec();
+      if (!externalStorage) {
+        const statusError = await this.generateStatusError(StatusCode.STORAGE_NOT_FOUND, job);
+        throw new Error(statusError.errorCode);
+      }
+      externalStorage = await this.decryptToken(externalStorage);
+      const newConfig = createRcloneConfig(externalStorage);
+      await appendToFile(configFile, newConfig);
+      this.logger.info(`Generated config for remote "${storage}"`);
+    }
   }
 
   private async findAvailableQuality(uploadedFiles: RcloneFile[], allQualityList: number[], parsedInput: path.ParsedPath,

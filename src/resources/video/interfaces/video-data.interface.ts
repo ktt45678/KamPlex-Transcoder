@@ -1,6 +1,7 @@
 export interface IVideoData {
   _id: string;
   filename: string;
+  path: string;
   size: number;
   mimeType: string;
   producerUrl: string;
@@ -14,6 +15,7 @@ export interface IVideoData {
   //av1Params: string;
   //qualityList: number[];
   //encodingSettings: IEncodingSetting[];
+  linkedStorage?: string;
   advancedOptions: IAdvancedOptions;
   isPrimary: boolean;
   user: string;

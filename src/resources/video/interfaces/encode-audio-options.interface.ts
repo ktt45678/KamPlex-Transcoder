@@ -1,8 +1,22 @@
 import { Job } from 'bullmq';
 import { ParsedPath } from 'path';
+import FFprobe from 'ffprobe-client';
 
 import { StreamManifest } from '../../../utils';
 import { IVideoData } from './video-data.interface';
+
+export interface EncodeAudioByTrackOptions {
+  inputFile: string;
+  parsedInput: ParsedPath;
+  type: 'normal' | 'surround';
+  audioTrack: FFprobe.FFProbeStream;
+  audioAACParams: string[];
+  audioOpusParams: string[];
+  isDefault: boolean;
+  downmix: boolean;
+  manifest: StreamManifest;
+  job: Job<IVideoData>;
+}
 
 export interface EncodeAudioOptions {
   inputFile: string;
