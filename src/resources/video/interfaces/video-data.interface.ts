@@ -34,6 +34,7 @@ export interface IEncodingSetting {
 
 export interface IAdvancedOptions {
   selectAudioTracks?: number[];
+  extraAudioTracks?: number[];
   h264Tune?: string;
   overrideSettings?: IEncodingSetting[];
 }

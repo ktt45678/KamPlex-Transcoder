@@ -212,12 +212,13 @@ export class VideoService {
     if (codec === VideoCodec.H264) {
       this.logger.info('Processing audio');
       const defaultAudioTrack = audioTracks.find(a => a.disposition.default) || audioTracks[0];
-      const allowedAudioTracks = [...new Set(job.data.advancedOptions?.selectAudioTracks || []).add(defaultAudioTrack.index)];
+      const allowedAudioTracks = new Set(job.data.advancedOptions?.selectAudioTracks || []).add(defaultAudioTrack.index);
 
-      const audioNormalTrack = audioTracks.find(a => a.channels <= 2 && allowedAudioTracks.includes(a.index));
-      const audioSurroundTrack = audioTracks.find(a => a.channels > 2 && allowedAudioTracks.includes(a.index));
+      const audioNormalTrack = audioTracks.find(a => a.channels <= 2 && allowedAudioTracks.has(a.index));
+      const audioSurroundTrack = audioTracks.find(a => a.channels > 2 && allowedAudioTracks.has(a.index));
       const audioPrimaryTracks = [audioNormalTrack, audioSurroundTrack].filter(a => a != null);
-      const audioExtraTracks = audioTracks.filter(a => !audioPrimaryTracks.includes(a) && allowedAudioTracks.includes(a.index));
+      const allowedExtraAudioTracks = new Set(job.data.advancedOptions?.extraAudioTracks || []);
+      const audioExtraTracks = audioTracks.filter(a => !audioPrimaryTracks.includes(a) && allowedExtraAudioTracks.has(a.index));
 
       const firstAudioTrack = audioNormalTrack || audioSurroundTrack || defaultAudioTrack;
       const secondAudioTrack = audioSurroundTrack;
@@ -256,9 +257,10 @@ export class VideoService {
         for (let i = 0; i < audioExtraTracks.length; i++) {
           const extraAudioTrack = audioExtraTracks[i];
           const extraTrackLang = extraAudioTrack.tags?.language || 'N/A';
+          const extraTrackType = extraAudioTrack.channels > 2 ? 'surround' : 'normal';
           this.logger.info(`Audio track index ${extraAudioTrack.index} (others, language: ${extraTrackLang})`);
           await this.encodeAudioByTrack({
-            inputFile, parsedInput, type: 'normal', audioTrack: extraAudioTrack, audioAACParams: audioParams,
+            inputFile, parsedInput, type: extraTrackType, audioTrack: extraAudioTrack, audioAACParams: audioParams,
             audioOpusParams: audioSpeedParams, isDefault: false, downmix: extraAudioTrack.channels > 2, manifest, job
           });
         }
