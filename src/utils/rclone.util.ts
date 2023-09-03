@@ -3,7 +3,7 @@ import child_process from 'child_process';
 import path from 'path';
 
 import { IStorage } from '../resources/video/interfaces/storage.interface';
-import { RcloneFile } from '../common/interfaces';
+import { RcloneCommandOptions, RcloneFile } from '../common/interfaces';
 import { escapeRegExp } from './string-helper.util';
 
 export function createRcloneConfig(storage: IStorage) {
@@ -66,6 +66,36 @@ export function downloadFile(configPath: string, rcloneDir: string, remote: stri
   });
 }
 
+export async function readRemoteFile(configPath: string, rcloneDir: string, remote: string, folder: string, file: string,
+  logFn: (args: string[]) => void) {
+  const filePath = path.posix.join(folder, file);
+  const args: string[] = [
+    '--config', `"${configPath}"`,
+    'cat', `${remote}:${filePath}`
+  ];
+  logFn(args);
+  return new Promise<string>((resolve, reject) => {
+    const rclone = child_process.spawn(`"${rcloneDir}/rclone"`, args, { shell: true });
+    let fileContent = '';
+    let errorMessage = '';
+    rclone.stdout.setEncoding('utf8');
+    rclone.stdout.on('data', (data) => {
+      fileContent += data;
+    });
+    rclone.stderr.setEncoding('utf8');
+    rclone.stderr.on('data', (data) => {
+      errorMessage += data + '\n';
+    });
+
+    rclone.on('exit', (code) => {
+      if (code !== 0)
+        reject({ code: code, message: errorMessage })
+      else
+        resolve(fileContent);
+    });
+  });
+}
+
 export async function deletePath(configPath: string, rcloneDir: string, remote: string, path: string, logFn: (args: string[]) => void) {
   const args: string[] = [
     '--config', `"${configPath}"`,
@@ -75,6 +105,35 @@ export async function deletePath(configPath: string, rcloneDir: string, remote: 
   const pathExist = await isPathExist(configPath, rcloneDir, remote, path);
   if (!pathExist) return;
   //console.log('\x1b[36m%s\x1b[0m', 'rclone ' + args.join(' '));
+  return new Promise<void>((resolve, reject) => {
+    const rclone = child_process.spawn(`"${rcloneDir}/rclone"`, args, { shell: true });
+    let errorMessage = '';
+    rclone.stderr.setEncoding('utf8');
+    rclone.stderr.on('data', (data) => {
+      errorMessage += data + '\n';
+    });
+
+    rclone.on('exit', (code) => {
+      if (code === 0 || code === 9)
+        resolve();
+      else
+        reject({ code: code, message: errorMessage })
+    });
+  });
+}
+
+export async function emptyPath(configPath: string, rcloneDir: string, remote: string, path: string, logFn: (args: string[]) => void,
+  options: RcloneCommandOptions = {}) {
+  const args: string[] = [
+    '--config', `"${configPath}"`,
+    'delete', `${remote}:${path}`,
+    '--rmdirs'
+  ];
+  options.include && args.push('--include', options.include);
+  options.exclude && args.push('--exclude', options.exclude);
+  logFn(args);
+  const pathExist = await isPathExist(configPath, rcloneDir, remote, path);
+  if (!pathExist) return;
   return new Promise<void>((resolve, reject) => {
     const rclone = child_process.spawn(`"${rcloneDir}/rclone"`, args, { shell: true });
     let errorMessage = '';
@@ -117,14 +176,17 @@ export function deleteRemote(configPath: string, rcloneDir: string, remote: stri
   });
 }
 
-export function listJson(configPath: string, rcloneDir: string, remote: string, filterPath?: string) {
+export function listRemoteJson(configPath: string, rcloneDir: string, remote: string, folder: string,
+  options: RcloneCommandOptions = {}) {
   const args: string[] = [
     '--config', `"${configPath}"`,
-    'lsjson', `${remote}:`
+    'lsjson', `${remote}:${folder}`
   ];
-  if (filterPath) {
-    args.push('--include', `/${filterPath}/`);
-  }
+  options.dirsOnly && args.push('--dirs-only');
+  options.filesOnly && args.push('--files-only');
+  options.recursive && args.push('--recursive');
+  options.include && args.push('--include', options.include);
+  options.exclude && args.push('--exclude', options.exclude);
   //console.log('\x1b[36m%s\x1b[0m', 'rclone ' + args.join(' '));
   return new Promise<RcloneFile[]>((resolve, reject) => {
     const rclone = child_process.spawn(`"${rcloneDir}/rclone"`, args, { shell: true });

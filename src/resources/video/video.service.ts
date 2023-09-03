@@ -16,12 +16,13 @@ import { settingModel } from '../../models/setting.model';
 import { IVideoData, IJobData, IStorage, IEncodingSetting, MediaQueueResult, EncodeAudioOptions, EncodeVideoOptions, VideoSourceInfo, CreateAudioEncodingArgsOptions, CreateVideoEncodingArgsOptions, EncodeAudioByTrackOptions } from './interfaces';
 import { AudioCodec, StatusCode, VideoCodec, RejectCode, TaskQueue } from '../../enums';
 import { ENCODING_QUALITY, AUDIO_PARAMS, AUDIO_SURROUND_PARAMS, VIDEO_H264_PARAMS, VIDEO_VP9_PARAMS, VIDEO_AV1_PARAMS, AUDIO_SPEED_PARAMS, AUDIO_SURROUND_OPUS_PARAMS } from '../../config';
-import { RcloneFile } from '../../common/interfaces';
+import { HlsManifest, RcloneFile } from '../../common/interfaces';
 import { KamplexApiService } from '../../common/modules/kamplex-api';
 import {
   createRcloneConfig, downloadFile, renameFile, deleteFile, deletePath, createSnowFlakeId, divideFromString, findInFile,
   appendToFile, deleteFolder, generateSprites, parseProgress, progressPercent, MediaInfoResult, StringCrypto,
-  getMediaInfo, createH264Params, StreamManifest, hasFreeSpaceToCopyFile, trimSlugFilename, statFile, mkdirRemote
+  getMediaInfo, createH264Params, StreamManifest, hasFreeSpaceToCopyFile, trimSlugFilename, statFile, mkdirRemote, listRemoteJson,
+  readRemoteFile, emptyPath, fileExists
 } from '../../utils';
 
 type JobNameType = 'update-source' | 'add-stream-video' | 'add-stream-audio' | 'add-stream-manifest' | 'finished-encoding' |
@@ -95,13 +96,23 @@ export class VideoService {
     if (job.data.linkedStorage)
       await this.ensureRcloneConfigExist(rcloneConfigFile, job.data.linkedStorage, job);
 
+    // Retry if the transcoder was interrupted before
+    const retryFromInterruption = await fileExists(transcodeDir);
+    if (retryFromInterruption) {
+      this.logger.notice('Transcode directory detected, maybe the transcoder was not exited properly before, cleaning up...');
+      const status = { jobId: job.id, ...job.data };
+      await this.videoResultQueue.add('retry-encoding', status);
+      await deleteFolder(transcodeDir);
+    }
+
     let availableQualityList: number[] | null = null;
     // Find and validate source quality if the quality is available on db
     {
       const sourceInfo = await mediaStorageModel.findOne({ _id: job.data._id }, { _id: 1, name: 1, quality: 1 }).lean().exec();
       if (sourceInfo?.quality) {
         try {
-          availableQualityList = await this.validateSourceQuality(parsedInput, sourceInfo.quality, qualityList, codec, job);
+          availableQualityList = await this.validateSourceQuality(parsedInput, sourceInfo.quality, qualityList, codec,
+            retryFromInterruption, job);
           if (availableQualityList === null)
             return {}; // There's nothing to encode
         } finally {
@@ -181,7 +192,8 @@ export class VideoService {
     // Validate source file by reading the local file
     if (!availableQualityList) {
       try {
-        availableQualityList = await this.validateSourceQuality(parsedInput, videoTrack.height, qualityList, codec, job);
+        availableQualityList = await this.validateSourceQuality(parsedInput, videoTrack.height, qualityList, codec,
+          retryFromInterruption, job);
         if (availableQualityList === null)
           return {}; // There's nothing to encode
       } finally {
@@ -207,9 +219,13 @@ export class VideoService {
     });
 
     const manifest = new StreamManifest();
+    // const existingManifestData = await this.findExistingManifest(job.data.storage, job.data._id, codec);
+    // if (existingManifestData !== null)
+    //   manifest.load(existingManifestData);
 
     // Skip audio encoding for other codecs
-    if (codec === VideoCodec.H264) {
+    // Only encode if there's no audio track inside the manifest data
+    if (codec === VideoCodec.H264 /*&& manifest.manifest.audioTracks.length === 0*/) {
       this.logger.info('Processing audio');
       const defaultAudioTrack = audioTracks.find(a => a.disposition.default) || audioTracks[0];
       const allowedAudioTracks = new Set(job.data.advancedOptions?.selectAudioTracks || []).add(defaultAudioTrack.index);
@@ -238,30 +254,17 @@ export class VideoService {
           inputFile, parsedInput, type: 'normal', audioTrack: firstAudioTrack, audioAACParams: audioParams,
           audioOpusParams: audioSpeedParams, isDefault: !secondAudioTrack, downmix: firstAudioTrack.channels > 2, manifest, job
         });
-        // this.logger.info('Audio codec: AAC');
-        // const audioDuration = firstAudioTrack.duration ? Math.trunc(+firstAudioTrack.duration) : 0;
-        // const audioChannels = firstAudioTrack.channels || 2;
-        // const downmix = audioChannels > 2;
-        // await this.encodeAudio({
-        //   inputFile, parsedInput, sourceInfo: { duration: audioDuration, channels: audioChannels },
-        //   audioTrackIndex: firstAudioTrack.index, codec: AudioCodec.AAC, isDefault: true,
-        //   downmix, audioParams, manifest, job
-        // });
-        // this.logger.info('Audio codec: OPUS');
-        // await this.encodeAudio({
-        //   inputFile, parsedInput, sourceInfo: { duration: audioDuration, channels: audioChannels },
-        //   audioTrackIndex: firstAudioTrack.index, codec: AudioCodec.OPUS, isDefault: false,
-        //   downmix, audioParams: audioSpeedParams, manifest, job
-        // });
         // Encode any others audio tracks
         for (let i = 0; i < audioExtraTracks.length; i++) {
           const extraAudioTrack = audioExtraTracks[i];
           const extraTrackLang = extraAudioTrack.tags?.language || 'N/A';
           const extraTrackType = extraAudioTrack.channels > 2 ? 'surround' : 'normal';
-          this.logger.info(`Audio track index ${extraAudioTrack.index} (others, language: ${extraTrackLang})`);
+          const extraAACParams = extraAudioTrack.channels > 2 ? audioSurroundParams : audioParams;
+          const extraOpusParams = extraAudioTrack.channels > 2 ? audioSurroundOpusParams : audioSpeedParams;
+          this.logger.info(`Audio track index ${extraAudioTrack.index} (others, channels: ${extraAudioTrack.channels}, language: ${extraTrackLang})`);
           await this.encodeAudioByTrack({
-            inputFile, parsedInput, type: extraTrackType, audioTrack: extraAudioTrack, audioAACParams: audioParams,
-            audioOpusParams: audioSpeedParams, isDefault: false, downmix: extraAudioTrack.channels > 2, manifest, job
+            inputFile, parsedInput, type: extraTrackType, audioTrack: extraAudioTrack, audioAACParams: extraAACParams,
+            audioOpusParams: extraOpusParams, isDefault: false, downmix: false, manifest, job
           });
         }
       } catch (e) {
@@ -274,39 +277,6 @@ export class VideoService {
         const statusError = await this.generateStatusError(StatusCode.ENCODE_AUDIO_FAILED, job);
         throw new Error(statusError.errorCode);
       }
-
-      // Encode surround audio track
-      // if (secondAudioTrack != null) {
-      //   this.logger.info(`Audio track index ${secondAudioTrack.index}`);
-      //   try {
-      //     this.logger.info('Audio codec: AAC Surround');
-      //     const audioDuration = secondAudioTrack.duration ? Math.trunc(+secondAudioTrack.duration) : 0;
-      //     const audioChannels = secondAudioTrack.channels || 0;
-      //     await this.encodeAudio({
-      //       inputFile, parsedInput, sourceInfo: { duration: audioDuration, channels: audioChannels },
-      //       audioTrackIndex: secondAudioTrack.index, codec: AudioCodec.AAC_SURROUND, isDefault: false, downmix: false,
-      //       audioParams: audioSurroundParams, manifest, job
-      //     });
-      //     // Only encode opus surround if the source audio has 6 (5.1) or 8 (7.1) channels
-      //     if ([6, 8].includes(audioChannels)) {
-      //       this.logger.info('Audio codec: OPUS Surround');
-      //       await this.encodeAudio({
-      //         inputFile, parsedInput, sourceInfo: { duration: audioDuration, channels: audioChannels },
-      //         audioTrackIndex: secondAudioTrack.index, codec: AudioCodec.OPUS_SURROUND, isDefault: false, downmix: false,
-      //         audioParams: audioSurroundOpusParams, manifest, job
-      //       });
-      //     }
-      //   } catch (e) {
-      //     this.logger.error(JSON.stringify(e));
-      //     await deleteFolder(transcodeDir);
-      //     if (e === RejectCode.JOB_CANCEL) {
-      //       this.logger.info(`Received cancel signal from job id: ${job.id}`);
-      //       return {};
-      //     }
-      //     const statusError = await this.generateStatusError(StatusCode.ENCODE_AUDIO_FAILED, job);
-      //     throw new Error(statusError.errorCode);
-      //   }
-      // }
     }
 
     try {
@@ -1023,27 +993,61 @@ export class VideoService {
   }
 
   private async validateSourceQuality(parsedInput: path.ParsedPath, quality: number, qualityList: number[], codec: number,
-    job: Job<IVideoData>): Promise<number[] | null> {
+    retryFromInterruption: boolean, job: Job<IVideoData>): Promise<number[] | null> {
     const allQualityList = this.calculateQuality(quality, qualityList);
     this.logger.info(`All quality: ${allQualityList.length ? allQualityList.join(', ') : 'None'}`);
     if (!allQualityList.length) {
       const statusError = await this.generateStatusError(StatusCode.LOW_QUALITY_VIDEO, job, { discard: true });
       throw new UnrecoverableError(statusError.errorCode);
     }
-
-    // Check already encoded files
-    this.logger.info('Checking already encoded files');
-    let alreadyEncodedFiles = await this.findUploadedFiles(job.data.storage, job.data._id, job.id, `${this.thumbnailFolder}/**`);
-    const availableQualityList = await this.findAvailableQuality(alreadyEncodedFiles, allQualityList, parsedInput, codec,
-      job.data.replaceStreams);
-    this.logger.info(`Available quality: ${availableQualityList.length ? availableQualityList.join(', ') : 'None'}`);
-    if (!availableQualityList.length) {
-      this.logger.info('Everything is already encoded, no need to continue');
-      await this.kamplexApiService.ensureProducerAppIsOnline(job.data.producerUrl);
-      await this.videoResultQueue.add('cancelled-encoding', { ...job.data, jobId: job.id, keepStreams: true });
-      return null;
+    let availableQualityList: number[];
+    if (!retryFromInterruption) {
+      // Check already encoded files
+      this.logger.info('Checking already encoded files');
+      let alreadyEncodedFiles = await this.findUploadedFiles(job.data.storage, job.data._id, job.id, `${this.thumbnailFolder}/**`);
+      availableQualityList = await this.findAvailableQuality(alreadyEncodedFiles, allQualityList, parsedInput, codec,
+        job.data.replaceStreams);
+      this.logger.info(`Available quality: ${availableQualityList.length ? availableQualityList.join(', ') : 'None'}`);
+      if (!availableQualityList.length) {
+        this.logger.info('Everything is already encoded, no need to continue');
+        await this.kamplexApiService.ensureProducerAppIsOnline(job.data.producerUrl);
+        await this.videoResultQueue.add('cancelled-encoding', { ...job.data, jobId: job.id, keepStreams: true });
+        return null;
+      }
+    } else {
+      availableQualityList = [...allQualityList];
+    }
+    // Ensure the folder is empty if we need to encode all the qualities
+    if (allQualityList.length === availableQualityList.length && retryFromInterruption) {
+      const rcloneConfigFile = this.configService.get<string>('RCLONE_CONFIG_FILE');
+      const rcloneDir = this.configService.get<string>('RCLONE_DIR');
+      this.logger.info('Cleanning source folder');
+      await emptyPath(rcloneConfigFile, rcloneDir, job.data.storage, `${job.data._id}/*`, args => {
+        this.logger.info('rclone ' + args.join(' '));
+      }, {
+        include: '*/**'
+      });
     }
     return availableQualityList;
+  }
+
+  private async findExistingManifest(remote: string, parentFolder: string, codec: number) {
+    const rcloneConfigFile = this.configService.get<string>('RCLONE_CONFIG_FILE');
+    const rcloneDir = this.configService.get<string>('RCLONE_DIR');
+    const [manifestFileInfo] = await listRemoteJson(rcloneConfigFile, rcloneDir, remote, parentFolder, {
+      filesOnly: true,
+      recursive: true,
+      include: `*/manifest_${codec}.json`
+    });
+    if (!manifestFileInfo)
+      return null;
+    this.logger.info(`Found existing manifest from ${manifestFileInfo.Path}, reading data...`);
+    const manifestContent = await readRemoteFile(rcloneConfigFile, rcloneDir, remote, parentFolder, manifestFileInfo.Path, args => {
+      this.logger.info('rclone ' + args.join(' '));
+    });
+    if (!manifestContent)
+      return null;
+    return <HlsManifest>JSON.parse(manifestContent);
   }
 
   private async decryptToken(storage: IStorage) {

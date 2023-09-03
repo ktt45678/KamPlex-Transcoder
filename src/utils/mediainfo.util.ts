@@ -1,13 +1,13 @@
 import child_process from 'child_process';
 
 const KNWON_ENCODING_SETTINGS = ['cabac', 'ref', 'deblock', 'analyse', 'me', 'subme', 'psy', 'psy_rd', 'mixed_ref', 'me_range',
-  'chroma_me', 'trellis', '8x8dct', 'deadzone', 'fast_pskip', 'nr', 'decimate', 'interlaced', 'bluray_compat', 'constrained_intra',
+  'chroma_me', 'trellis', '8x8dct', 'deadzone', 'fast_pskip', 'nr', 'decimate', 'interlaced', 'constrained_intra',
   'bframes', 'b_pyramid', 'b_adapt', 'b_bias', 'direct', 'weightb', 'weightp', 'scenecut', 'intra_refresh', 'rc_lookahead', 'mbtree',
   'nal_hrd', 'filler', 'ip_ratio', 'aq'
 ];
 
 const MULTI_RES_ENCODING_SETTINGS = ['cabac', 'ref', 'deblock', 'analyse', 'me', 'subme', 'psy', 'psy_rd', 'mixed_ref', 'me_range',
-  'trellis', '8x8dct', 'deadzone', 'fast_pskip', 'nr', 'decimate', 'interlaced', 'bluray_compat', 'constrained_intra', 'bframes',
+  'trellis', '8x8dct', 'deadzone', 'fast_pskip', 'nr', 'decimate', 'interlaced', 'constrained_intra', 'bframes',
   'b_pyramid', 'b_bias', 'weightb', 'weightp', 'scenecut', 'intra_refresh', 'rc_lookahead', 'mbtree',
   'nal_hrd', 'filler', 'ip_ratio', 'aq'
 ];

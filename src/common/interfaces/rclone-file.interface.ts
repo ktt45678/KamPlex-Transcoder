@@ -7,3 +7,12 @@ export interface RcloneFile {
   IsDir: boolean;
   ID: string;
 }
+
+export interface RcloneCommandOptions {
+  dirsOnly?: boolean;
+  filesOnly?: boolean;
+  recursive?: boolean;
+  include?: string;
+  exclude?: string;
+  filter?: string;
+}

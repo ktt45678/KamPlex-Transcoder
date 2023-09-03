@@ -134,6 +134,10 @@ export class StreamManifest {
     return format + ' ' + (channels - 1) + '.1' + ' - ' + codec;
   }
 
+  load(value: HlsManifest) {
+    this.manifest = { ...value };
+  }
+
   saveFile(path: string) {
     const json = JSON.stringify(this.manifest);
     return fs.promises.writeFile(path, json, { encoding: 'utf8' });
