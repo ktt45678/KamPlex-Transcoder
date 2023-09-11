@@ -568,7 +568,7 @@ export class VideoService {
       const rcloneDir = this.configService.get<string>('RCLONE_DIR');
       const rcloneConfigFile = this.configService.get<string>('RCLONE_CONFIG_FILE');
       const downloadStorage = job.data.linkedStorage || job.data.storage;
-      await downloadFile(rcloneConfigFile, rcloneDir, downloadStorage, job.data._id, job.data.filename, parsedInput.dir,
+      await downloadFile(rcloneConfigFile, rcloneDir, downloadStorage, job.data.path, job.data.filename, parsedInput.dir,
         !!job.data.linkedStorage,
         (args => {
           this.logger.info('rclone ' + args.join(' '));
@@ -958,22 +958,22 @@ export class VideoService {
   }
 
   private async findAvailableQuality(uploadedFiles: RcloneFile[], allQualityList: number[], parsedInput: path.ParsedPath,
-    codec: number, replaceStreams?: string[]) {
+    codec: number, replaceStreams: string[] = [], job: Job<IVideoData>) {
     const fileIds: bigint[] = [];
     for (let i = 0; i < uploadedFiles.length; i++) {
       if (!allQualityList.find(q => uploadedFiles[i].Name === `${parsedInput.name}_${q}.mp4`))
         continue;
       const stringId = uploadedFiles[i].Path.split('/')[0];
-      if (replaceStreams?.includes(stringId))
+      if (replaceStreams.includes(stringId))
         continue;
       if (isNaN(<any>stringId))
         continue;
       fileIds.push(BigInt(stringId));
     }
     await mongoose.connect(this.configService.get<string>('DATABASE_URL'), { family: 4 });
-    const fileList = await mediaStorageModel.find({ _id: { $in: fileIds }, codec }).lean().exec();
+    const sourceFileMeta = await mediaStorageModel.findOne({ _id: job.data._id }).lean().exec();
     await mongoose.disconnect();
-    const qualityList = fileList.map(file => file.quality);
+    const qualityList = sourceFileMeta.streams.filter(file => file.codec === codec).map(file => file.quality);
     const availableQualityList = allQualityList.filter(quality => !qualityList.includes(quality));
     return availableQualityList;
   }
@@ -1006,7 +1006,7 @@ export class VideoService {
       this.logger.info('Checking already encoded files');
       let alreadyEncodedFiles = await this.findUploadedFiles(job.data.storage, job.data._id, job.id, `${this.thumbnailFolder}/**`);
       availableQualityList = await this.findAvailableQuality(alreadyEncodedFiles, allQualityList, parsedInput, codec,
-        job.data.replaceStreams);
+        job.data.replaceStreams, job);
       this.logger.info(`Available quality: ${availableQualityList.length ? availableQualityList.join(', ') : 'None'}`);
       if (!availableQualityList.length) {
         this.logger.info('Everything is already encoded, no need to continue');
