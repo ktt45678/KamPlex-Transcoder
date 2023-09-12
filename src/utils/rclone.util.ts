@@ -1,9 +1,10 @@
 import { DateTime } from 'luxon';
+import { stdout } from 'process';
 import child_process from 'child_process';
 import path from 'path';
 
 import { IStorage } from '../resources/video/interfaces/storage.interface';
-import { RcloneCommandOptions, RcloneFile } from '../common/interfaces';
+import { RcloneCommandOptions, RcloneFile, RcloneProgress } from '../common/interfaces';
 import { escapeRegExp } from './string-helper.util';
 
 export function createRcloneConfig(storage: IStorage) {
@@ -45,19 +46,26 @@ export function downloadFile(configPath: string, rcloneDir: string, remote: stri
     '--ignore-checksum',
     '--config', `"${configPath}"`,
     '--low-level-retries', '5',
+    '-v', '--use-json-log',
+    '--stats', '3m',
     'copy', ...copyArgs
   ];
   logFn(args);
   //console.log('\x1b[36m%s\x1b[0m', 'rclone ' + args.join(' '));
   return new Promise<void>((resolve, reject) => {
     const rclone = child_process.spawn(`"${rcloneDir}/rclone"`, args, { shell: true });
+
     let errorMessage = '';
     rclone.stderr.setEncoding('utf8');
     rclone.stderr.on('data', (data) => {
-      errorMessage += data + '\n';
+      const progress = parseRcloneUploadProgress(data);
+      if (progress)
+        stdout.write(`${progress.msg}\r`);
+      errorMessage = data;
     });
 
     rclone.on('exit', (code) => {
+      stdout.write('\n');
       if (code === 0 || code === 9)
         resolve();
       else
@@ -248,4 +256,17 @@ export function mkdirRemote(configPath: string, rcloneDir: string, remote: strin
       }
     });
   });
+}
+
+export function parseRcloneUploadProgress(data: string) {
+  let logJson: RcloneProgress;
+  try {
+    logJson = JSON.parse(data.replace(new RegExp('\r|\n|\t', 'g'), ' '));
+  } catch {
+    console.log(data);
+    return null;
+  }
+  if (logJson.msg)
+    logJson.msg = logJson.msg.replace(new RegExp('\r|\n|\t', 'g'), ' ').replace(/ +(?= )/g, '');
+  return logJson;
 }

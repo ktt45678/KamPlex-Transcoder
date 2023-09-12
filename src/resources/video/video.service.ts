@@ -22,7 +22,7 @@ import {
   createRcloneConfig, downloadFile, renameFile, deleteFile, deletePath, createSnowFlakeId, divideFromString, findInFile,
   appendToFile, deleteFolder, generateSprites, parseProgress, progressPercent, MediaInfoResult, StringCrypto,
   getMediaInfo, createH264Params, StreamManifest, hasFreeSpaceToCopyFile, trimSlugFilename, statFile, mkdirRemote, listRemoteJson,
-  readRemoteFile, emptyPath, fileExists
+  readRemoteFile, emptyPath, fileExists, parseRcloneUploadProgress
 } from '../../utils';
 
 type JobNameType = 'update-source' | 'add-stream-video' | 'add-stream-audio' | 'add-stream-manifest' | 'finished-encoding' |
@@ -108,7 +108,7 @@ export class VideoService {
     let availableQualityList: number[] | null = null;
     // Find and validate source quality if the quality is available on db
     {
-      const sourceInfo = await mediaStorageModel.findOne({ _id: job.data._id }, { _id: 1, name: 1, quality: 1 }).lean().exec();
+      const sourceInfo = await mediaStorageModel.findOne({ _id: BigInt(job.data._id) }, { _id: 1, name: 1, quality: 1 }).lean().exec();
       if (sourceInfo?.quality) {
         try {
           availableQualityList = await this.validateSourceQuality(parsedInput, sourceInfo.quality, qualityList, codec,
@@ -763,6 +763,8 @@ export class VideoService {
     const args: string[] = [
       '--config', rcloneConfigFile,
       '--low-level-retries', '5',
+      '-v', '--use-json-log',
+      '--stats', '3m',
       'move', `"${source}"`, `"${dest}"`
     ];
     if (include) {
@@ -777,6 +779,8 @@ export class VideoService {
     const args: string[] = [
       '--config', rcloneConfigFile,
       '--low-level-retries', '5',
+      '-v', '--use-json-log',
+      '--stats', '3m',
       targetCommand,
       `"${transcodeDir}/${this.thumbnailFolder}"`,
       `"${remote}:${parentFolder}/${this.thumbnailFolder}"`
@@ -863,7 +867,9 @@ export class VideoService {
 
       rclone.stderr.setEncoding('utf8');
       rclone.stderr.on('data', (data) => {
-        stdout.write(data);
+        const progress = parseRcloneUploadProgress(data);
+        if (progress)
+          stdout.write(`${progress.msg}\r`);
       });
 
       const cancelledJobChecker = this.createCancelJobChecker(jobId, () => {
@@ -931,6 +937,9 @@ export class VideoService {
         clearInterval(cancelledJobChecker);
         if (isCancelled) {
           reject(RejectCode.JOB_CANCEL);
+        } else if (code === 3) {
+          // Return an empty array if directory not found
+          resolve([]);
         } else if (code !== 0) {
           reject(`Error listing files, rclone exited with status code: ${code}`);
         } else {
@@ -971,7 +980,7 @@ export class VideoService {
       fileIds.push(BigInt(stringId));
     }
     await mongoose.connect(this.configService.get<string>('DATABASE_URL'), { family: 4 });
-    const sourceFileMeta = await mediaStorageModel.findOne({ _id: job.data._id }).lean().exec();
+    const sourceFileMeta = await mediaStorageModel.findOne({ _id: BigInt(job.data._id) }).lean().exec();
     await mongoose.disconnect();
     const qualityList = sourceFileMeta.streams.filter(file => file.codec === codec).map(file => file.quality);
     const availableQualityList = allQualityList.filter(quality => !qualityList.includes(quality));
