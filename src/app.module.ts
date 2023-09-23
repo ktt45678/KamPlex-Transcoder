@@ -1,6 +1,7 @@
 import { Module } from '@nestjs/common';
 import { ConfigModule, ConfigService } from '@nestjs/config';
 import { BullModule } from '@nestjs/bullmq';
+import { ScheduleModule } from '@nestjs/schedule';
 import { utilities as nestWinstonModuleUtilities, WinstonModule } from 'nest-winston';
 import { parseRedisUrl } from 'parse-redis-url-simple';
 import * as winston from 'winston';
@@ -56,6 +57,7 @@ import { VideoCancelModule } from './resources/video-cancel/video-cancel.module'
         })
       ]
     }),
+    ScheduleModule.forRoot(),
     VideoModule,
     VideoCancelModule
   ],

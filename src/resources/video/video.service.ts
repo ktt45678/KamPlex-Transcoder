@@ -1,5 +1,6 @@
 import { Inject, Injectable } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { Cron } from '@nestjs/schedule';
 import { InjectQueue } from '@nestjs/bullmq';
 import { Job, Queue, UnrecoverableError } from 'bullmq';
 import mongoose from 'mongoose';
@@ -22,7 +23,7 @@ import {
   createRcloneConfig, downloadFile, renameFile, deleteFile, deletePath, createSnowFlakeId, divideFromString, findInFile,
   appendToFile, deleteFolder, generateSprites, parseProgress, progressPercent, MediaInfoResult, StringCrypto,
   getMediaInfo, createH264Params, StreamManifest, hasFreeSpaceToCopyFile, trimSlugFilename, statFile, mkdirRemote, listRemoteJson,
-  readRemoteFile, emptyPath, fileExists, parseRcloneUploadProgress
+  readRemoteFile, emptyPath, fileExists, parseRcloneUploadProgress, findAllRemotes, refreshRemoteTokens
 } from '../../utils';
 
 type JobNameType = 'update-source' | 'add-stream-video' | 'add-stream-audio' | 'add-stream-manifest' | 'finished-encoding' |
@@ -546,6 +547,20 @@ export class VideoService {
         }
       });
     }
+  }
+
+  @Cron('0 0 */5 * *')
+  async handleInactiveRefreshToken() {
+    // Runs every 5 days
+    // Try to refresh all inactive tokens
+    this.logger.info('Running scheduled token refresh');
+    const rcloneDir = this.configService.get<string>('RCLONE_DIR');
+    const rcloneConfig = this.configService.get<string>('RCLONE_CONFIG_FILE');
+    const remoteList = await findAllRemotes(rcloneConfig, rcloneDir);
+    if (!remoteList.length) return;
+    await refreshRemoteTokens(rcloneConfig, rcloneDir, remoteList, args => {
+      this.logger.info('rclone ' + args.join(' '));
+    });
   }
 
   private async prepareMediaFile(inputFileName: string, parsedInput: path.ParsedPath, tempFileName: string, playlistName: string,

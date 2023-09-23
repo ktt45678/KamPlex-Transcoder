@@ -258,6 +258,66 @@ export function mkdirRemote(configPath: string, rcloneDir: string, remote: strin
   });
 }
 
+export function findAllRemotes(configPath: string, rcloneDir: string) {
+  const args: string[] = [
+    '--config', `"${configPath}"`,
+    'listremotes'
+  ];
+  return new Promise<string[]>((resolve, reject) => {
+    const rclone = child_process.spawn(`"${rcloneDir}/rclone"`, args, { shell: true });
+
+    let remoteListString = '';
+    let errorMessage = '';
+
+    rclone.stdout.setEncoding('utf8');
+    rclone.stdout.on('data', (data) => {
+      remoteListString += data;
+    });
+
+    rclone.stderr.setEncoding('utf8');
+    rclone.stderr.on('data', (data) => {
+      errorMessage += data + '\n';
+    });
+
+    rclone.on('exit', (code: number) => {
+      if (code !== 0) {
+        reject({ code: code, message: errorMessage });
+      } else {
+        const remoteList = remoteListString.split('\n').filter(r => !!r);
+        resolve(remoteList);
+      }
+    });
+  });
+}
+
+export async function refreshRemoteTokens(configPath: string, rcloneDir: string, remotes: string[], logFn: (args: string[]) => void) {
+  for (let i = 0; i < remotes.length; i++) {
+    const remote = remotes[i];
+    const args: string[] = [
+      '--config', `"${configPath}"`,
+      'about', remote
+    ];
+    logFn(args);
+    await new Promise<void>((resolve, reject) => {
+      const rclone = child_process.spawn(`"${rcloneDir}/rclone"`, args, { shell: true });
+      let errorMessage = '';
+
+      rclone.stderr.setEncoding('utf8');
+      rclone.stderr.on('data', (data) => {
+        errorMessage += data + '\n';
+      });
+
+      rclone.on('exit', (code: number) => {
+        if (code !== 0) {
+          reject({ code: code, message: errorMessage });
+        } else {
+          resolve();
+        }
+      });
+    });
+  }
+}
+
 export function parseRcloneUploadProgress(data: string) {
   let logJson: RcloneProgress;
   try {
