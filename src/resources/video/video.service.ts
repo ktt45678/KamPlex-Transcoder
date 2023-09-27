@@ -383,8 +383,8 @@ export class VideoService {
       audioTrackIndex: audioTrack.index, codec: aacType, isDefault, downmix, audioParams: audioAACParams,
       manifest, job
     });
-    // Only encode opus surround if the source audio has 6 (5.1) or 8 (7.1) channels
-    if (type === 'normal' || [6, 8].includes(audioChannels)) {
+    // Only encode opus surround if the source audio has 5 (4.1), 6 (5.1), 7 (6.1) or 8 (7.1) channels
+    if (type === 'normal' || [5, 6, 7, 8].includes(audioChannels)) {
       this.logger.info('Audio codec: OPUS');
       await this.encodeAudio({
         inputFile, parsedInput, sourceInfo: { duration: audioDuration, channels: audioChannels },
