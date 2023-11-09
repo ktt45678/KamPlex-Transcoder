@@ -34,7 +34,8 @@ export interface VideoSourceInfo {
   duration: number;
   fps: number;
   bitrate: number;
-  quality: number;
+  width: number;
+  height: number;
   sourceH264Params: string;
 }
 

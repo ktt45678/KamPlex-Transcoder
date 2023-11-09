@@ -12,55 +12,76 @@ import { parseProgress, progressPercent } from './ffmpeg-helper.util';
 import { RejectCode } from '../enums/reject-code.enum';
 import { fileExists } from './file-helper.util';
 
-interface GeneratorOptions {
+type OutputImageFormat = 'webp' | 'jpeg' | 'avif';
+
+interface InputOptions {
   /** The source video file. Must be an FFMPEG supported video format. */
-  source: string,
+  source: string;
 
   /** The Output Folder */
-  output: string,
+  output: string;
 
   /** Length of the video in seconds. */
-  duration: number,
+  duration: number;
 
   /** Path to FFmpeg Folder */
-  ffmpegDir: string,
+  ffmpegDir: string;
 
-  jobId: string | number,
+  jobId: string | number;
 
-  canceledJobIds: (string | number)[],
+  canceledJobIds: (string | number)[];
+}
 
+interface GeneratorOptions {
   /** (Optional) The Thumbnail Width */
-  tw?: number,
-  /** (Optional) The Thumbnail Height */
-  th?: number,
+  tw?: number;
 
-  /** (Optional) Output WebP Sprite Pages instead of PNG? */
-  toWebp?: boolean,
+  /** (Optional) The Thumbnail Height */
+  th?: number;
+
+  /** (Optional) Total column */
+  pageCols?: number;
+
+  /** (Optional) Total rows */
+  pageRows?: number;
+
+  /** (Optional) Output file name prefix */
+  prefix?: string;
+
+  /** (Optional) Output WebP Sprite Pages or JPEG? */
+  format?: OutputImageFormat;
 }
 
 interface GeneratorOutput {
   /** The total amount of Sprite Pages generated */
-  pageCount: number,
+  pageCount: number;
 
   /** The total amount of frames present in the Sprite Pages */
-  frameCount: number,
+  frameCount: number;
 
-  vttPath: string,
+  //vttPath: string;
 
   /** An array of the generated sprites in WebP or JPEG format. */
-  spritePaths: string[],
+  spritePaths: string[];
 }
 
-export async function generateSprites(options: GeneratorOptions): Promise<GeneratorOutput> {
+const defaultGeneratorOptions: GeneratorOptions = {
+  tw: 160,
+  th: 160,
+  pageCols: 10,
+  pageRows: 10,
+  prefix: 'M',
+  format: 'jpeg'
+};
+
+export async function generateSprites(options: InputOptions, generatorOptionsList: GeneratorOptions[] = []): Promise<GeneratorOutput> {
+  if (!generatorOptionsList.length) {
+    generatorOptionsList = [{ ...defaultGeneratorOptions }];
+  } else {
+    generatorOptionsList = generatorOptionsList.map(options => ({ ...defaultGeneratorOptions, ...options }));
+  }
 
   const sourceFile = options.source;
-
-  let tw = options.tw || 160;
-  let th = options.th || 90;
-  const maxWidth = 160;
-  const maxHeight = 160;
-
-  //const toWebp = options.toWebp || false;
 
   const outputPath = options.output;
   const tempPath = path.join(options.output, 'generated');
@@ -70,6 +91,10 @@ export async function generateSprites(options: GeneratorOptions): Promise<Genera
     mkdirp(outputPath),
     mkdirp(tempPath)
   ]);
+
+  const maxThumbSize = Math.max(...generatorOptionsList.map(o => o.th), ...generatorOptionsList.map(o => o.tw));
+  const maxWidth = maxThumbSize;
+  const maxHeight = maxThumbSize;
 
   let predicted = Math.ceil(options.duration);
 
@@ -83,95 +108,127 @@ export async function generateSprites(options: GeneratorOptions): Promise<Genera
 
   predicted = frameCount;
 
-  let pageCols = 10;
-  let pageRows = 10;
-
-  if (predicted < pageCols) pageCols = predicted;
-
-  let pageTotal = pageCols * pageRows;
-
-  let pages = Math.ceil(predicted / (pageCols * pageRows));
-
-  //console.log(`Predicting ${pages} pages.`);
-
-  const output = {
-    pageCount: pages,
+  const output: GeneratorOutput = {
+    pageCount: 0,
     frameCount: predicted,
     spritePaths: [],
-  } as GeneratorOutput;
+  };
 
-  let vttString = 'WEBVTT';
-  let vttStartTime = 0;
-  let vttEndTime = 1;
+  for (let genOptIndex = 0; genOptIndex < generatorOptionsList.length; genOptIndex++) {
+    const generatorOptions = generatorOptionsList[genOptIndex];
 
-  const firstThumbPath = path.join(tempPath, 'thumb_1.png');
-  if (await fileExists(firstThumbPath)) {
-    const thumbMetadata = await sharp(firstThumbPath).metadata();
-    thumbMetadata.width && (tw = thumbMetadata.width);
-    thumbMetadata.height && (th = thumbMetadata.height);
-  }
+    let tw = generatorOptions.tw || 160;
+    let th = generatorOptions.th || 160;
 
-  for (let pageID = 0; pageID < pages; pageID++) {
+    let pageCols = generatorOptions.pageCols || 10;
+    let pageRows = generatorOptions.pageRows || 10;
 
-    // How many can we fit on this sheet?
-    let remainder = predicted - (pageID * pageTotal);
-    if (remainder > pageTotal) remainder = pageTotal;
+    if (predicted < pageCols) pageCols = predicted;
 
-    let width = Math.ceil(tw * pageCols);
-    let height = Math.ceil(th * Math.ceil(remainder / pageRows));
+    let pageTotal = pageCols * pageRows;
 
-    //console.log(`Canvas size: ${width} x ${height}`);
+    let pages = Math.ceil(predicted / (pageCols * pageRows));
 
-    let canvas = sharp({
-      create: {
-        width: width,
-        height: height,
-        channels: 3,
-        background: { r: 0, g: 0, b: 0 }
+    //console.log(`Predicting ${pages} pages.`);
+
+    output.pageCount = pages;
+
+    let vttString = 'WEBVTT';
+    let vttStartTime = 0;
+    let vttEndTime = 1;
+
+    const firstThumbPath = path.join(tempPath, 'thumb_1.png');
+    if (await fileExists(firstThumbPath)) {
+      const thumbMetadata = await sharp(firstThumbPath).metadata();
+      if (thumbMetadata.width && thumbMetadata.height) {
+        const scaledSizes = getScaledSizes(thumbMetadata.width, thumbMetadata.height, tw, th);
+        tw = scaledSizes.width;
+        th = scaledSizes.height;
       }
-    });
-
-    const finalFilename = `M${pageID}.jpg`;
-
-    //console.log(`Images left: ${remainder}`);
-
-    const overlayThumbs: sharp.OverlayOptions[] = [];
-    // Load and place the images.
-    for (let i = 0; i < remainder; i++) {
-      let offset = pageTotal * pageID;
-      const frameNumber = offset + i + 1;
-      let imagePath = path.join(tempPath, `thumb_${frameNumber}.png`);
-      //console.log(`Loading ${imagePath}`);
-
-      let dx = Math.floor((i % pageCols) * tw);
-      let dy = Math.floor(i / pageCols) * th;
-
-      //console.log(`Drawing thumb_${frameNumber}.png at ${dx}x${dy}`);
-
-      overlayThumbs.push({ input: imagePath, top: dy, left: dx });
-
-      //if (vttEndTime > options.duration) continue;
-      const startTimeString = Duration.fromObject({ seconds: vttStartTime }).toISOTime();
-      const endTimeString = Duration.fromObject({ seconds: vttEndTime }).toISOTime();
-      vttString += '\n\n' + frameNumber;
-      vttString += '\n' + startTimeString + ' --> ' + endTimeString;
-      vttString += '\n' + `${finalFilename}#xywh=${dx},${dy},${tw},${th}`;
-      vttStartTime++;
-      vttEndTime++;
     }
 
-    canvas.composite(overlayThumbs);
+    for (let pageID = 0; pageID < pages; pageID++) {
 
-    // Generate the final image.
-    const finalPath = path.join(outputPath, finalFilename);
-    await canvas.jpeg().toFile(finalPath);
+      // How many can we fit on this sheet?
+      let remainder = predicted - (pageID * pageTotal);
+      if (remainder > pageTotal) remainder = pageTotal;
 
-    output.spritePaths.push(finalPath);
+      let width = Math.ceil(tw * pageCols);
+      let height = Math.ceil(th * Math.ceil(remainder / pageRows));
+
+      //console.log(`Canvas size: ${width} x ${height}`);
+
+      let canvas = sharp({
+        create: {
+          width: width,
+          height: height,
+          channels: 3,
+          background: { r: 0, g: 0, b: 0 }
+        }
+      });
+
+      const finalFilenameExt = getFileNameExtension(generatorOptions.format);
+      const finalFilename = `${generatorOptions.prefix}${pageID}.${finalFilenameExt}`;
+
+      //console.log(`Images left: ${remainder}`);
+
+      const overlayThumbs: sharp.OverlayOptions[] = [];
+      // Load and place the images.
+      for (let i = 0; i < remainder; i++) {
+        let offset = pageTotal * pageID;
+        const frameNumber = offset + i + 1;
+        let imagePath = path.join(tempPath, `thumb_${frameNumber}.png`);
+        //console.log(`Loading ${imagePath}`);
+
+        let dx = Math.floor((i % pageCols) * tw);
+        let dy = Math.floor(i / pageCols) * th;
+
+        //console.log(`Drawing thumb_${frameNumber}.png at ${dx}x${dy}`);
+        const thumbFrameMeta = await sharp(imagePath).metadata();
+        let thumbFrameInput: Buffer | string;
+
+        if (thumbFrameMeta.width === tw && thumbFrameMeta.height === th)
+          thumbFrameInput = imagePath;
+        else
+          thumbFrameInput = await sharp(imagePath).resize({ width: tw, height: th }).toBuffer();
+
+        overlayThumbs.push({ input: thumbFrameInput, top: dy, left: dx });
+
+        //if (vttEndTime > options.duration) continue;
+        const startTimeString = Duration.fromObject({ seconds: vttStartTime }).toISOTime();
+        const endTimeString = Duration.fromObject({ seconds: vttEndTime }).toISOTime();
+        vttString += '\n\n' + frameNumber;
+        vttString += '\n' + startTimeString + ' --> ' + endTimeString;
+        vttString += '\n' + `${finalFilename}#xywh=${dx},${dy},${tw},${th}`;
+        vttStartTime++;
+        vttEndTime++;
+      }
+
+      canvas
+        .composite(overlayThumbs)
+        .flatten();
+
+      // Generate the final image.
+      const finalPath = path.join(outputPath, finalFilename);
+
+      // Set output format
+      if (generatorOptions.format === 'jpeg')
+        canvas.jpeg({ mozjpeg: true, progressive: true, quality: 80 });
+      else if (generatorOptions.format === 'webp')
+        canvas.webp({ quality: 80, alphaQuality: 0, minSize: true, effort: 4 });
+      else if (generatorOptions.format === 'avif')
+        canvas.avif({ quality: 65, effort: 4 });
+
+      // Save to file
+      await canvas.toFile(finalPath);
+
+      output.spritePaths.push(finalPath);
+    }
+
+    // Save VTT file
+    const finalVTTPath = path.join(outputPath, `${generatorOptions.prefix}.vtt`);
+    await fs.promises.writeFile(finalVTTPath, vttString);
   }
-
-  // Save VTT file
-  const finalVTTPath = path.join(outputPath, 'M.vtt');
-  await fs.promises.writeFile(finalVTTPath, vttString);
 
   // Perform Clear up.
   //console.log(`Clearing away temporary output directory ${outputPath}`);
@@ -180,7 +237,7 @@ export async function generateSprites(options: GeneratorOptions): Promise<Genera
   return output;
 }
 
-function generateThumbnails(inputFile: string, outputFolder: string, maxWidth: number, maxHeight: number, options: GeneratorOptions) {
+function generateThumbnails(inputFile: string, outputFolder: string, maxWidth: number, maxHeight: number, input: InputOptions) {
   return new Promise<number>((resolve, reject) => {
     let isCancelled = false;
 
@@ -198,13 +255,13 @@ function generateThumbnails(inputFile: string, outputFolder: string, maxWidth: n
 
     let generatedFrames = 0;
 
-    const ffmpeg = child_process.spawn(`"${options.ffmpegDir}/ffmpeg"`, args, { shell: true });
+    const ffmpeg = child_process.spawn(`"${input.ffmpegDir}/ffmpeg"`, args, { shell: true });
 
     ffmpeg.stdout.setEncoding('utf8');
     ffmpeg.stdout.on('data', async (data: string) => {
       const progress = parseProgress(data);
       generatedFrames = progress.frame || 0;
-      const percent = progressPercent(progress.outTimeMs, options.duration * 1000000);
+      const percent = progressPercent(progress.outTimeMs, input.duration * 1000000);
       stdout.write(`Encoding: ${percent}% - frame: ${progress.frame || 'N/A'} - fps: ${progress.fps || 'N/A'} - bitrate: ${progress.bitrate} - time: ${progress.outTime}\r`);
     });
 
@@ -214,10 +271,10 @@ function generateThumbnails(inputFile: string, outputFolder: string, maxWidth: n
     });
 
     const cancelledJobChecker = setInterval(() => {
-      const index = options.canceledJobIds.findIndex(j => +j === +options.jobId);
+      const index = input.canceledJobIds.findIndex(j => +j === +input.jobId);
       if (index === -1) return;
 
-      options.canceledJobIds = options.canceledJobIds.filter(id => +id > +options.jobId);
+      input.canceledJobIds = input.canceledJobIds.filter(id => +id > +input.jobId);
       isCancelled = true;
       ffmpeg.stdin.write('q');
       ffmpeg.stdin.end();
@@ -235,4 +292,46 @@ function generateThumbnails(inputFile: string, outputFolder: string, maxWidth: n
       }
     });
   });
+}
+
+function getScaledSizes(srcWidth: number, srcHeight: number, maxWidth: number, maxHeight: number) {
+  let newWidth = srcWidth;
+  let newHeight = srcHeight;
+
+  // Check if the source width exceeds the maximum width
+  if (srcWidth > maxWidth) {
+    newWidth = maxWidth;
+    newHeight = (newWidth * srcHeight) / srcWidth;
+
+    // Check if the new height exceeds the maximum height
+    if (newHeight > maxHeight) {
+      newHeight = maxHeight;
+      newWidth = (newHeight * srcWidth) / srcHeight;
+    }
+  } else if (srcHeight > maxHeight) {
+    // Check if the source height exceeds the maximum height
+    newHeight = maxHeight;
+    newWidth = (newHeight * srcWidth) / srcHeight;
+
+    // Check if the new width exceeds the maximum width
+    if (newWidth > maxWidth) {
+      newWidth = maxWidth;
+      newHeight = (newWidth * srcHeight) / srcWidth;
+    }
+  }
+
+  return { width: newWidth, height: newHeight };
+}
+
+function getFileNameExtension(format: OutputImageFormat) {
+  switch (format) {
+    case 'jpeg':
+      return 'jpg';
+    case 'webp':
+      return 'webp';
+    case 'avif':
+      return 'avif';
+    default:
+      return 'jpg';
+  }
 }

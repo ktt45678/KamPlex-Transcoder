@@ -14,7 +14,7 @@ import { Logger } from 'winston';
 import { externalStorageModel } from '../../models/external-storage.model';
 import { mediaStorageModel } from '../../models/media-storage.model';
 import { settingModel } from '../../models/setting.model';
-import { IVideoData, IJobData, IStorage, IEncodingSetting, MediaQueueResult, EncodeAudioOptions, EncodeVideoOptions, VideoSourceInfo, CreateAudioEncodingArgsOptions, CreateVideoEncodingArgsOptions, EncodeAudioByTrackOptions } from './interfaces';
+import { IVideoData, IJobData, IStorage, IEncodingSetting, MediaQueueResult, EncodeAudioOptions, EncodeVideoOptions, VideoSourceInfo, CreateAudioEncodingArgsOptions, CreateVideoEncodingArgsOptions, EncodeAudioByTrackOptions, AdvancedVideoSettings } from './interfaces';
 import { AudioCodec, StatusCode, VideoCodec, RejectCode, TaskQueue } from '../../enums';
 import { ENCODING_QUALITY, AUDIO_PARAMS, AUDIO_SURROUND_PARAMS, VIDEO_H264_PARAMS, VIDEO_VP9_PARAMS, VIDEO_AV1_PARAMS, AUDIO_SPEED_PARAMS, AUDIO_SURROUND_OPUS_PARAMS } from '../../config';
 import { HlsManifest, RcloneFile } from '../../common/interfaces';
@@ -23,7 +23,7 @@ import {
   createRcloneConfig, downloadFile, renameFile, deleteFile, deletePath, createSnowFlakeId, divideFromString, findInFile,
   appendToFile, deleteFolder, generateSprites, parseProgress, progressPercent, MediaInfoResult, StringCrypto,
   getMediaInfo, createH264Params, StreamManifest, hasFreeSpaceToCopyFile, trimSlugFilename, statFile, mkdirRemote, listRemoteJson,
-  readRemoteFile, emptyPath, fileExists, parseRcloneUploadProgress, findAllRemotes, refreshRemoteTokens
+  readRemoteFile, emptyPath, fileExists, parseRcloneUploadProgress, findAllRemotes, refreshRemoteTokens, findH264ProfileLevel
 } from '../../utils';
 
 type JobNameType = 'update-source' | 'add-stream-video' | 'add-stream-audio' | 'add-stream-manifest' | 'finished-encoding' |
@@ -283,7 +283,7 @@ export class VideoService {
     try {
       const sourceInfo: VideoSourceInfo = {
         duration: videoDuration, fps: videoFps, bitrate: videoBitrate, codec: videoCodec, sourceH264Params: videoSourceH264Params,
-        quality: srcHeight
+        width: srcWidth, height: srcHeight
       };
       if (codec === VideoCodec.H264) {
         this.logger.info('Video codec: H264');
@@ -315,7 +315,10 @@ export class VideoService {
         ffmpegDir,
         jobId: job.id,
         canceledJobIds: this.CanceledJobIds
-      });
+      }, [
+        { tw: 160, th: 160, pageCols: 10, pageRows: 10, prefix: 'M', format: 'jpeg' },
+        { tw: 320, th: 320, pageCols: 5, pageRows: 5, prefix: 'L', format: 'jpeg' }
+      ]);
       const syncThumbnails = !!job.data.update;
       const rcloneMoveThumbArgs = this.createRcloneMoveThumbArgs(transcodeDir, job.data.storage, job.data._id, syncThumbnails);
       await this.uploadMedia(rcloneMoveThumbArgs, job.id);
@@ -632,12 +635,16 @@ export class VideoService {
           '"lowpass=c=LFE:f=120,pan=stereo|FL=.3FL+.21FC+.3FLC+.21SL+.21BL+.15BC+.21LFE|FR=.3FR+.21FC+.3FRC+.21SR+.21BR+.15BC+.21LFE,volume=1.6"'
         );
       }
-      else {
+      else if (codec === AudioCodec.OPUS) {
         args.push('-ac', '2');
+        args.push('-mapping_family', '0');
       }
     } else if (channels > 2) {
       const channelValue = channels <= 8 ? channels.toString() : '8'; // 8 channels (7.1) is the limit for both aac and opus
       args.push('-ac', channelValue);
+      if (codec === AudioCodec.OPUS_SURROUND) {
+        args.push('-mapping_family', '1');
+      }
     }
     args.push(
       '-map', `0:${audioIndex}`,
@@ -664,15 +671,8 @@ export class VideoService {
     ];
     if (encodingSetting)
       this.resolveEncodingSettings(args, encodingSetting, sourceInfo, crfKey);
-    if (codec === VideoCodec.H264) {
-      if (advancedSettings.h264Tune) {
-        args.push('-tune', advancedSettings.h264Tune);
-      }
-      if (sourceInfo.sourceH264Params) {
-        const x264Params = createH264Params(sourceInfo.sourceH264Params, sourceInfo.quality === quality);
-        args.push('-x264-params', `"${x264Params}"`);
-      }
-    }
+    if (codec === VideoCodec.H264)
+      this.resolveH264Params(args, advancedSettings, quality, sourceInfo);
     args.push(
       '-map', '0:v:0',
       //'-map_metadata', '-1',
@@ -686,7 +686,7 @@ export class VideoService {
   }
 
   private createTwoPassesVideoEncodingArgs(options: CreateVideoEncodingArgsOptions & { pass: number }) {
-    const { inputFile, parsedInput, codec, quality, videoParams, sourceInfo, crfKey, encodingSetting, pass } = options;
+    const { inputFile, parsedInput, codec, quality, videoParams, sourceInfo, crfKey, advancedSettings, encodingSetting, pass } = options;
     const gopSize = (sourceInfo.fps ? sourceInfo.fps * 2 : 48).toString();
     if (pass === 1) {
       const outputName = process.platform === 'win32' ? 'NUL' : '/dev/null';
@@ -702,10 +702,8 @@ export class VideoService {
       ];
       if (encodingSetting)
         this.resolveEncodingSettings(args, encodingSetting, sourceInfo, crfKey);
-      if (codec === VideoCodec.H264 && sourceInfo.sourceH264Params) {
-        const x264Params = createH264Params(sourceInfo.sourceH264Params, sourceInfo.quality === quality);
-        args.push('-x264-params', `"${x264Params}"`);
-      }
+      if (codec === VideoCodec.H264)
+        this.resolveH264Params(args, advancedSettings, quality, sourceInfo);
       args.push(
         '-map', '0:v:0',
         '-vf', `scale=-2:${quality}`,
@@ -728,10 +726,8 @@ export class VideoService {
     ];
     if (encodingSetting)
       this.resolveEncodingSettings(args, encodingSetting, sourceInfo, crfKey);
-    if (codec === VideoCodec.H264 && sourceInfo.sourceH264Params) {
-      const x264Params = createH264Params(sourceInfo.sourceH264Params, sourceInfo.quality === quality);
-      args.push('-x264-params', `"${x264Params}"`);
-    }
+    if (codec === VideoCodec.H264)
+      this.resolveH264Params(args, advancedSettings, quality, sourceInfo);
     args.push(
       '-map', '0:v:0',
       //'-map_metadata', '-1',
@@ -758,6 +754,23 @@ export class VideoService {
     } else {
       encodingSetting.maxrate && args.push('-maxrate', `${encodingSetting.maxrate}K`);
       encodingSetting.bufsize && args.push('-bufsize', `${encodingSetting.bufsize}K`);
+    }
+  }
+
+  private resolveH264Params(args: string[], advancedSettings: AdvancedVideoSettings, quality: number, sourceInfo: VideoSourceInfo) {
+    if (advancedSettings.h264Tune) {
+      args.push('-tune', advancedSettings.h264Tune);
+    }
+    if (quality >= 1440) {
+      // Find the best h264 profile level for > 2k resolution
+      const level = findH264ProfileLevel(sourceInfo.width, sourceInfo.height, quality, sourceInfo.fps);
+      if (level !== null) {
+        args.push('-level:v', level);
+      }
+    }
+    if (sourceInfo.sourceH264Params) {
+      const x264Params = createH264Params(sourceInfo.sourceH264Params, sourceInfo.height === quality);
+      args.push('-x264-params', `"${x264Params}"`);
     }
   }
 

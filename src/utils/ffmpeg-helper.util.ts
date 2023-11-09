@@ -49,3 +49,34 @@ export function parseProgress(data: string) {
 export function progressPercent(current: number, videoDuration: number) {
   return videoDuration ? Math.trunc(current / videoDuration * 100) : 0;
 }
+
+export function findH264ProfileLevel(srcWidth: number, srcHeight: number, targetHeight: number, fps: number) {
+  const targetWidth = targetHeight * srcWidth / srcHeight;
+  const targetFrameSize = targetWidth * targetHeight;
+  // 4K 2160p
+  if (targetFrameSize >= (3840 * 2160)) {
+    if (targetFrameSize <= (4096 * 2160)) {
+      if (fps <= 28)
+        return '5.1';
+      if (fps <= 60)
+        return '5.2';
+      return null;
+    }
+    if (targetFrameSize <= (4096 * 2304)) {
+      if (fps <= 26)
+        return '5.1';
+      if (fps <= 56)
+        return '5.2';
+      return null;
+    }
+  }
+  // 2K 1440p
+  if (targetFrameSize >= (2560 * 1440)) {
+    if (fps <= 30)
+      return '5';
+    if (fps <= 60)
+      return '5.1';
+    return null;
+  }
+  return null;
+}
