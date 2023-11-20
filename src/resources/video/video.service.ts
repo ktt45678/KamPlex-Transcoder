@@ -1010,7 +1010,9 @@ export class VideoService {
     await mongoose.connect(this.configService.get<string>('DATABASE_URL'), { family: 4 });
     const sourceFileMeta = await mediaStorageModel.findOne({ _id: BigInt(job.data._id) }).lean().exec();
     await mongoose.disconnect();
-    const qualityList = sourceFileMeta.streams.filter(file => file.codec === codec).map(file => file.quality);
+    const qualityList = sourceFileMeta.streams
+      .filter(file => file.codec === codec && fileIds.includes(file._id))
+      .map(file => file.quality);
     const availableQualityList = allQualityList.filter(quality => !qualityList.includes(quality));
     return availableQualityList;
   }
