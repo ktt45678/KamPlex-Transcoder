@@ -78,5 +78,54 @@ export function findH264ProfileLevel(srcWidth: number, srcHeight: number, target
       return '5.1';
     return null;
   }
+  // FHD 1080p
+  if (targetFrameSize >= (1920 * 1080)) {
+    if (targetFrameSize <= (2048 * 1088)) {
+      if (fps <= 30)
+        return '4.1';
+      if (fps <= 60)
+        return '4.2';
+      return null;
+    }
+    if (targetFrameSize <= (2560 * 1439)) {
+      if (fps <= 30)
+        return '5';
+      if (fps <= 60)
+        return '5.1';
+      return null;
+    }
+  }
+  // HD 720p
+  if (targetFrameSize >= (1280 * 720)) {
+    if (targetFrameSize === 1280 * 720) {
+      if (fps <= 30)
+        return '3.1';
+      if (fps <= 60)
+        return '3.2';
+    }
+    if (targetFrameSize <= (1280 * 1024)) {
+      if (fps <= 30)
+        return '3.2';
+      if (fps <= 60)
+        return '4.2';
+      return null;
+    }
+    if (targetFrameSize <= (1920 * 1079)) {
+      if (fps <= 30)
+        return '5';
+      if (fps <= 60)
+        return '5.1';
+      return null;
+    }
+  }
+  // SD 480p
+  if (targetFrameSize >= (854 * 480)) {
+    if (targetFrameSize <= 720 * 576) {
+      return '3.1';
+    }
+    if (targetFrameSize <= 1280 * 719) {
+      return '3.2';
+    }
+  }
   return null;
 }
