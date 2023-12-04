@@ -31,7 +31,8 @@ export function createRcloneConfig(storage: IStorage) {
     const [driveId, folderId] = storage.folderId.split('#');
     folderId && (newConfig += `root_folder_id = ${storage.folderId}\n`);
     newConfig += `drive_id = ${driveId}\n`;
-    newConfig += 'drive_type = business\n\n';
+    newConfig += 'drive_type = business\n';
+    newConfig += 'no_versions = true\n\n';
   }
   return newConfig;
 }
@@ -79,7 +80,7 @@ export async function readRemoteFile(configPath: string, rcloneDir: string, remo
   const filePath = path.posix.join(folder, file);
   const args: string[] = [
     '--config', `"${configPath}"`,
-    'cat', `${remote}:${filePath}`
+    'cat', `"${remote}:${filePath}"`
   ];
   logFn(args);
   return new Promise<string>((resolve, reject) => {
@@ -107,7 +108,7 @@ export async function readRemoteFile(configPath: string, rcloneDir: string, remo
 export async function deletePath(configPath: string, rcloneDir: string, remote: string, path: string, logFn: (args: string[]) => void) {
   const args: string[] = [
     '--config', `"${configPath}"`,
-    'purge', `${remote}:${path}`
+    'purge', `"${remote}:${path}"`
   ];
   logFn(args);
   const pathExist = await isPathExist(configPath, rcloneDir, remote, path);
@@ -134,7 +135,7 @@ export async function emptyPath(configPath: string, rcloneDir: string, remote: s
   options: RcloneCommandOptions = {}) {
   const args: string[] = [
     '--config', `"${configPath}"`,
-    'delete', `${remote}:${path}`,
+    'delete', `"${remote}:${path}"`,
     '--rmdirs'
   ];
   options.include && args.push('--include', options.include);
@@ -188,7 +189,7 @@ export function listRemoteJson(configPath: string, rcloneDir: string, remote: st
   options: RcloneCommandOptions = {}) {
   const args: string[] = [
     '--config', `"${configPath}"`,
-    'lsjson', `${remote}:${folder}`
+    'lsjson', `"${remote}:${folder}"`
   ];
   options.dirsOnly && args.push('--dirs-only');
   options.filesOnly && args.push('--files-only');
@@ -224,7 +225,7 @@ export function isPathExist(configPath: string, rcloneDir: string, remote: strin
   const args: string[] = [
     '--config', `"${configPath}"`,
     '--low-level-retries', '1',
-    'lsd', `${remote}:${path}`
+    'lsd', `"${remote}:${path}"`
   ];
   //console.log('\x1b[36m%s\x1b[0m', 'rclone ' + args.join(' '));
   return new Promise<boolean>((resolve) => {
@@ -243,7 +244,7 @@ export function mkdirRemote(configPath: string, rcloneDir: string, remote: strin
   const args: string[] = [
     '--config', `"${configPath}"`,
     '--low-level-retries', '5',
-    'mkdir', `${remote}:${path}`
+    'mkdir', `"${remote}:${path}"`
   ];
   //console.log('\x1b[36m%s\x1b[0m', 'rclone ' + args.join(' '));
   return new Promise<boolean>((resolve) => {
@@ -320,10 +321,11 @@ export async function refreshRemoteTokens(configPath: string, rcloneDir: string,
 
 export function parseRcloneUploadProgress(data: string) {
   let logJson: RcloneProgress;
+  const cleanData = data.replace(new RegExp('\r|\n|\t', 'g'), ' ');
   try {
-    logJson = JSON.parse(data.replace(new RegExp('\r|\n|\t', 'g'), ' '));
+    logJson = JSON.parse(cleanData);
   } catch {
-    console.log(data);
+    console.log(cleanData);
     return null;
   }
   if (logJson.msg)

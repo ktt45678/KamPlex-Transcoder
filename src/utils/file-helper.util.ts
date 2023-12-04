@@ -75,6 +75,7 @@ export async function deleteFile(filePath: string) {
 }
 
 export async function deleteFolder(folderPath: string) {
-  if (fileExists(folderPath))
+  const isFolderExists = await fileExists(folderPath);
+  if (isFolderExists)
     return fs.promises.rm(folderPath, { recursive: true, force: true, maxRetries: 3 });
 }

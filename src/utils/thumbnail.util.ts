@@ -11,6 +11,7 @@ import child_process from 'child_process';
 import { parseProgress, progressPercent } from './ffmpeg-helper.util';
 import { RejectCode } from '../enums/reject-code.enum';
 import { fileExists } from './file-helper.util';
+import { rgbaToThumbHash } from './thumbhash.util';
 
 type OutputImageFormat = 'webp' | 'jpeg' | 'avif';
 
@@ -63,6 +64,32 @@ interface GeneratorOutput {
 
   /** An array of the generated sprites in WebP or JPEG format. */
   spritePaths: string[];
+}
+
+interface ThumbnailFrame {
+  /** Start time */
+  startTime: number;
+
+  /** End time */
+  endTime: number;
+
+  /** Sprite path */
+  sprite: string;
+
+  /** Left */
+  x: number;
+
+  /** Top */
+  y: number;
+
+  /** Width */
+  width: number;
+
+  /** Height */
+  height: number;
+
+  /** Thumbnail hash */
+  placeholder: string;
 }
 
 const defaultGeneratorOptions: GeneratorOptions = {
@@ -137,6 +164,8 @@ export async function generateSprites(options: InputOptions, generatorOptionsLis
     let vttStartTime = 0;
     let vttEndTime = 1;
 
+    const jsonThumb: ThumbnailFrame[] = [];
+
     const firstThumbPath = path.join(tempPath, 'thumb_1.png');
     if (await fileExists(firstThumbPath)) {
       const thumbMetadata = await sharp(firstThumbPath).metadata();
@@ -157,6 +186,7 @@ export async function generateSprites(options: InputOptions, generatorOptionsLis
       let height = Math.ceil(th * Math.ceil(remainder / pageRows));
 
       //console.log(`Canvas size: ${width} x ${height}`);
+      stdout.write(`Canvas size: ${width}x${height}\n`);
 
       let canvas = sharp({
         create: {
@@ -184,6 +214,8 @@ export async function generateSprites(options: InputOptions, generatorOptionsLis
         let dy = Math.floor(i / pageCols) * th;
 
         //console.log(`Drawing thumb_${frameNumber}.png at ${dx}x${dy}`);
+        stdout.write(`Drawing thumb_${frameNumber} at ${dx}x${dy}\r`);
+
         const thumbFrameMeta = await sharp(imagePath).metadata();
         let thumbFrameInput: Buffer | string;
 
@@ -192,17 +224,31 @@ export async function generateSprites(options: InputOptions, generatorOptionsLis
         else
           thumbFrameInput = await sharp(imagePath).resize({ width: tw, height: th }).toBuffer();
 
+        // Push new thumbnail to the sprite
         overlayThumbs.push({ input: thumbFrameInput, top: dy, left: dx });
+        const thumbhash = await createThumbhash(thumbFrameInput, tw, th);
 
         //if (vttEndTime > options.duration) continue;
         const startTimeString = Duration.fromObject({ seconds: vttStartTime }).toISOTime();
         const endTimeString = Duration.fromObject({ seconds: vttEndTime }).toISOTime();
+        jsonThumb.push({
+          startTime: vttStartTime,
+          endTime: vttEndTime,
+          sprite: finalFilename,
+          x: dx,
+          y: dy,
+          width: tw,
+          height: th,
+          placeholder: thumbhash
+        });
         vttString += '\n\n' + frameNumber;
         vttString += '\n' + startTimeString + ' --> ' + endTimeString;
         vttString += '\n' + `${finalFilename}#xywh=${dx},${dy},${tw},${th}`;
         vttStartTime++;
         vttEndTime++;
       }
+
+      stdout.write('\n');
 
       canvas
         .composite(overlayThumbs)
@@ -228,6 +274,10 @@ export async function generateSprites(options: InputOptions, generatorOptionsLis
     // Save VTT file
     const finalVTTPath = path.join(outputPath, `${generatorOptions.prefix}.vtt`);
     await fs.promises.writeFile(finalVTTPath, vttString);
+
+    // Save JSON file
+    const finalJSONPath = path.join(outputPath, `${generatorOptions.prefix}.json`);
+    await fs.promises.writeFile(finalJSONPath, JSON.stringify(jsonThumb));
   }
 
   // Perform Clear up.
@@ -294,6 +344,23 @@ function generateThumbnails(inputFile: string, outputFolder: string, maxWidth: n
   });
 }
 
+async function createThumbhash(input: string | Buffer, srcWidth: number, srcHeight: number) {
+  const scaledSizes = getScaledSizes(srcWidth, srcHeight, 100, 100);
+  const rgba = await sharp(input).resize({ width: scaledSizes.width, height: scaledSizes.height }).ensureAlpha().raw().toBuffer();
+  const thumbhash = rgbaToThumbHash(scaledSizes.width, scaledSizes.height, rgba);
+  return Buffer.from(thumbhash).toString('base64').replace(/\=+$/, '');
+}
+
+// async function isSameImage(image1: string | Buffer, image2: string | Buffer, width: number, height: number) {
+//   const [rgb1, rgb2] = await Promise.all([
+//     sharp(image1).raw().toBuffer(),
+//     sharp(image2).raw().toBuffer()
+//   ]);
+//   const hash1 = bmvbhash({ width, height, data: new Uint8Array(rgb1) }, 8);
+//   const hash2 = bmvbhash({ width, height, data: new Uint8Array(rgb2) }, 8);
+//   return hash1 === hash2;
+// }
+
 function getScaledSizes(srcWidth: number, srcHeight: number, maxWidth: number, maxHeight: number) {
   let newWidth = srcWidth;
   let newHeight = srcHeight;
@@ -320,7 +387,10 @@ function getScaledSizes(srcWidth: number, srcHeight: number, maxWidth: number, m
     }
   }
 
-  return { width: newWidth, height: newHeight };
+  const roundedWidth = Math.ceil(newWidth) <= maxWidth ? Math.ceil(newWidth) : Math.floor(newWidth);
+  const roundedHeight = Math.ceil(newHeight) <= maxHeight ? Math.ceil(newHeight) : Math.floor(newHeight);
+
+  return { width: roundedWidth, height: roundedHeight };
 }
 
 function getFileNameExtension(format: OutputImageFormat) {
