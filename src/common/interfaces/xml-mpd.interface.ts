@@ -36,6 +36,7 @@ interface Representation {
   mimeType: string;
   codecs: string;
   audioSamplingRate: number;
+  sar?: string;
   bandwidth: number;
 }
 

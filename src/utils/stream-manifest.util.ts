@@ -21,10 +21,10 @@ export class StreamManifest {
   }
 
   async appendVideoPlaylist(options: {
-    mpdPath: string, m3u8PlaylistPath: string, width: number, height: number, format: string, mimeType: string, frameRate: number,
-    codec: number, uri: string
+    mpdPath: string, m3u8PlaylistPath: string, width: number, height: number, format: string, mimeType: string, language: string
+    frameRate: number, codec: number, uri: string
   }) {
-    const { mpdPath, m3u8PlaylistPath, width, height, format, mimeType, frameRate, codec, uri } = options;
+    const { mpdPath, m3u8PlaylistPath, width, height, format, mimeType, language, frameRate, codec, uri } = options;
     const mpd = await fs.promises.readFile(mpdPath, { encoding: 'utf8' });
     const xmlParser = new XMLParser({ ignoreAttributes: false, attributeNamePrefix: '', allowBooleanAttributes: true, ignoreDeclaration: true, parseAttributeValue: true });
     const mpdManifest = <ParsedXMLMPD>xmlParser.parse(mpd);
@@ -38,8 +38,10 @@ export class StreamManifest {
       width: width,
       height: height,
       par: videoPlaylist.par,
+      sar: videoPlaylist.Representation.sar || '1:1',
       bandwidth: videoPlaylist.Representation.bandwidth,
       duration: Duration.fromISO(mpdManifest.MPD.Period.duration).as('seconds'),
+      language: language,
       format: format,
       mimeType: mimeType,
       frameRate: frameRate,
@@ -73,7 +75,7 @@ export class StreamManifest {
     const mpdIndexRange = audioPlaylist.Representation.SegmentBase.indexRange.split('-');
     const mpdInitRange = audioPlaylist.Representation.SegmentBase.Initialization.range.split('-');
     this.manifest.audioTracks.push({
-      name: this.getAudioName(format, channels, codec),
+      name: this.getAudioName(format, channels),
       group: 'audio',
       default: isDefault,
       autoselect: isDefault,
@@ -126,12 +128,12 @@ export class StreamManifest {
     return segmentGroup;
   }
 
-  private getAudioName(format: string, channels: number, codec: number) {
+  private getAudioName(format: string, channels: number) {
     if (channels === 1)
       return format + ' ' + 'Mono';
     if (channels === 2)
       return format + ' ' + 'Stereo';
-    return format + ' ' + (channels - 1) + '.1' + ' - ' + codec;
+    return format + ' ' + (channels - 1) + '.1';
   }
 
   load(value: HlsManifest) {

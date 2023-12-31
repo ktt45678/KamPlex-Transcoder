@@ -14,6 +14,7 @@ import { Logger } from 'winston';
 import { externalStorageModel } from '../../models/external-storage.model';
 import { mediaStorageModel } from '../../models/media-storage.model';
 import { settingModel } from '../../models/setting.model';
+import { mediaModel } from '../../models/media.model';
 import { IVideoData, IJobData, IStorage, IEncodingSetting, MediaQueueResult, EncodeAudioOptions, EncodeVideoOptions, VideoSourceInfo, CreateAudioEncodingArgsOptions, CreateVideoEncodingArgsOptions, EncodeAudioByTrackOptions, AdvancedVideoSettings } from './interfaces';
 import { AudioCodec, StatusCode, VideoCodec, RejectCode, TaskQueue } from '../../enums';
 import { ENCODING_QUALITY, AUDIO_PARAMS, AUDIO_SURROUND_PARAMS, VIDEO_H264_PARAMS, VIDEO_VP9_PARAMS, VIDEO_AV1_PARAMS, AUDIO_SPEED_PARAMS, AUDIO_SURROUND_OPUS_PARAMS } from '../../config';
@@ -71,8 +72,9 @@ export class VideoService {
     }
 
     // Connect to MongoDB
-    await mongoose.connect(this.configService.get<string>('DATABASE_URL'), { family: 4 });
+    await mongoose.connect(this.configService.get<string>('DATABASE_URL'), { family: 4, useBigInt64: true });
     const appSettings = await settingModel.findOne({}).lean().exec();
+    const mediaInfo = await mediaModel.findOne({ _id: BigInt(job.data.media) }, { _id: 1, originalLang: 1 }).lean().exec();
 
     const audioParams = appSettings.audioParams ? appSettings.audioParams.split(' ') : this.AudioParams;
     const audioSpeedParams = appSettings.audioSpeedParams ? appSettings.audioSpeedParams.split(' ') : this.AudioSpeedParams;
@@ -241,19 +243,22 @@ export class VideoService {
       const secondAudioTrack = audioSurroundTrack;
 
       try {
+        // Audio language for primary track
+        const audioOriginalLang = mediaInfo.originalLang;
         // Encode surround audio track
         if (secondAudioTrack != null) {
           this.logger.info(`Audio track index ${secondAudioTrack.index} (surround)`);
           await this.encodeAudioByTrack({
             inputFile, parsedInput, type: 'surround', audioTrack: secondAudioTrack, audioAACParams: audioSurroundParams,
-            audioOpusParams: audioSurroundOpusParams, isDefault: true, downmix: false, manifest, job
+            audioOpusParams: audioSurroundOpusParams, isDefault: true, downmix: false, language: audioOriginalLang, manifest, job
           });
         }
         // Encode stereo or mono audio track
         this.logger.info(`Audio track index ${firstAudioTrack.index} (normal)`);
         await this.encodeAudioByTrack({
           inputFile, parsedInput, type: 'normal', audioTrack: firstAudioTrack, audioAACParams: audioParams,
-          audioOpusParams: audioSpeedParams, isDefault: !secondAudioTrack, downmix: firstAudioTrack.channels > 2, manifest, job
+          audioOpusParams: audioSpeedParams, isDefault: !secondAudioTrack, downmix: firstAudioTrack.channels > 2,
+          language: audioOriginalLang, manifest, job
         });
         // Encode any others audio tracks
         for (let i = 0; i < audioExtraTracks.length; i++) {
@@ -283,7 +288,7 @@ export class VideoService {
     try {
       const sourceInfo: VideoSourceInfo = {
         duration: videoDuration, fps: videoFps, bitrate: videoBitrate, codec: videoCodec, sourceH264Params: videoSourceH264Params,
-        width: srcWidth, height: srcHeight
+        width: srcWidth, height: srcHeight, language: mediaInfo.originalLang
       };
       if (codec === VideoCodec.H264) {
         this.logger.info('Video codec: H264');
@@ -375,14 +380,14 @@ export class VideoService {
   }
 
   private async encodeAudioByTrack(options: EncodeAudioByTrackOptions) {
-    const { inputFile, parsedInput, type, audioTrack, audioAACParams, audioOpusParams, isDefault, downmix, manifest, job } = options;
+    const { inputFile, parsedInput, type, audioTrack, audioAACParams, audioOpusParams, isDefault, downmix, language, manifest, job } = options;
     const aacType = type === 'normal' ? AudioCodec.AAC : AudioCodec.AAC_SURROUND;
     const opusType = type === 'normal' ? AudioCodec.OPUS : AudioCodec.OPUS_SURROUND;
     this.logger.info('Audio codec: AAC');
     const audioDuration = audioTrack.duration ? Math.trunc(+audioTrack.duration) : 0;
     const audioChannels = audioTrack.channels || (type === 'normal' ? 2 : 0);
     await this.encodeAudio({
-      inputFile, parsedInput, sourceInfo: { duration: audioDuration, channels: audioChannels },
+      inputFile, parsedInput, sourceInfo: { duration: audioDuration, channels: audioChannels, language },
       audioTrackIndex: audioTrack.index, codec: aacType, isDefault, downmix, audioParams: audioAACParams,
       manifest, job
     });
@@ -390,7 +395,7 @@ export class VideoService {
     if (type === 'normal' || [5, 6, 7, 8].includes(audioChannels)) {
       this.logger.info('Audio codec: OPUS');
       await this.encodeAudio({
-        inputFile, parsedInput, sourceInfo: { duration: audioDuration, channels: audioChannels },
+        inputFile, parsedInput, sourceInfo: { duration: audioDuration, channels: audioChannels, language },
         audioTrackIndex: audioTrack.index, codec: opusType, isDefault: false, downmix, audioParams: audioOpusParams,
         manifest, job
       });
@@ -426,7 +431,7 @@ export class VideoService {
       format: audioMITrack.Format,
       mimeType: 'audio/mp4',
       isDefault: isDefault,
-      language: audioMITrack.Language,
+      language: sourceInfo.language || audioMITrack.Language,
       channels: +audioMITrack.Channels || audioTrack.channels || 2,
       samplingRate: +audioMITrack.SamplingRate || +audioTrack.sample_rate || 0,
       codec: codec,
@@ -511,6 +516,7 @@ export class VideoService {
           height: +videoMITrack.Height || 0,
           format: videoMITrack.Format,
           mimeType: 'video/mp4',
+          language: sourceInfo.language || videoMITrack.Language,
           frameRate: +videoMITrack.FrameRate || +generalMITrack?.FrameRate,
           codec: codec,
           uri: `${streamId}/${videoFileName}`
@@ -1007,7 +1013,7 @@ export class VideoService {
         continue;
       fileIds.push(BigInt(stringId));
     }
-    await mongoose.connect(this.configService.get<string>('DATABASE_URL'), { family: 4 });
+    await mongoose.connect(this.configService.get<string>('DATABASE_URL'), { family: 4, useBigInt64: true });
     const sourceFileMeta = await mediaStorageModel.findOne({ _id: BigInt(job.data._id) }).lean().exec();
     await mongoose.disconnect();
     const qualityList = sourceFileMeta.streams

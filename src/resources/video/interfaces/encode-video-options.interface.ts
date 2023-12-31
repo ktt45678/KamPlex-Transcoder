@@ -36,6 +36,7 @@ export interface VideoSourceInfo {
   bitrate: number;
   width: number;
   height: number;
+  language: string | null;
   sourceH264Params: string;
 }
 

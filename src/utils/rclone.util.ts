@@ -194,8 +194,8 @@ export function listRemoteJson(configPath: string, rcloneDir: string, remote: st
   options.dirsOnly && args.push('--dirs-only');
   options.filesOnly && args.push('--files-only');
   options.recursive && args.push('--recursive');
-  options.include && args.push('--include', options.include);
-  options.exclude && args.push('--exclude', options.exclude);
+  options.include && args.push('--include', `"${options.include}"`);
+  options.exclude && args.push('--exclude', `"${options.exclude}"`);
   //console.log('\x1b[36m%s\x1b[0m', 'rclone ' + args.join(' '));
   return new Promise<RcloneFile[]>((resolve, reject) => {
     const rclone = child_process.spawn(`"${rcloneDir}/rclone"`, args, { shell: true });

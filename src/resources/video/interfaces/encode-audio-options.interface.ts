@@ -14,6 +14,7 @@ export interface EncodeAudioByTrackOptions {
   audioOpusParams: string[];
   isDefault: boolean;
   downmix: boolean;
+  language?: string | null;
   manifest: StreamManifest;
   job: Job<IVideoData>;
 }
@@ -44,4 +45,5 @@ export interface CreateAudioEncodingArgsOptions {
 export interface AudioSourceInfo {
   duration: number;
   channels: number;
+  language?: string | null;
 }
