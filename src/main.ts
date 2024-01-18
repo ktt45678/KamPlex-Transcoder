@@ -4,7 +4,7 @@ import { WINSTON_MODULE_NEST_PROVIDER } from 'nest-winston';
 
 import { AppModule } from './app.module';
 import { PORT, ADDRESS } from './config';
-import { applyMongoDBPatches } from './utils/mongoose-helper.util';
+import { applyBigIntPatches } from './utils';
 
 async function bootstrap() {
   const app = await NestFactory.create<NestFastifyApplication>(AppModule, new FastifyAdapter({ logger: true }));
@@ -15,5 +15,5 @@ async function bootstrap() {
   await app.listen(port, address);
 }
 
-applyMongoDBPatches();
+applyBigIntPatches();
 bootstrap();
