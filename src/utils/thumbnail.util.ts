@@ -186,7 +186,7 @@ export async function generateSprites(options: InputOptions, generatorOptionsLis
       let height = Math.ceil(th * Math.ceil(remainder / pageRows));
 
       //console.log(`Canvas size: ${width} x ${height}`);
-      stdout.write(`Canvas size: ${width}x${height}\n`);
+      stdout.write(`Thumbnail page ${pageID + 1}: ${width}x${height}\r`);
 
       let canvas = sharp({
         create: {
@@ -214,7 +214,6 @@ export async function generateSprites(options: InputOptions, generatorOptionsLis
         let dy = Math.floor(i / pageCols) * th;
 
         //console.log(`Drawing thumb_${frameNumber}.png at ${dx}x${dy}`);
-        stdout.write(`Drawing thumb_${frameNumber} at ${dx}x${dy}\r`);
 
         const thumbFrameMeta = await sharp(imagePath).metadata();
         let thumbFrameInput: Buffer | string;
@@ -248,8 +247,6 @@ export async function generateSprites(options: InputOptions, generatorOptionsLis
         vttEndTime++;
       }
 
-      stdout.write('\n');
-
       canvas
         .composite(overlayThumbs)
         .flatten();
@@ -270,6 +267,8 @@ export async function generateSprites(options: InputOptions, generatorOptionsLis
 
       output.spritePaths.push(finalPath);
     }
+
+    stdout.write('\n');
 
     // Save VTT file
     const finalVTTPath = path.join(outputPath, `${generatorOptions.prefix}.vtt`);

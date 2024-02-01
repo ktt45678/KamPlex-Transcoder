@@ -1,3 +1,4 @@
+export * from './consumer-worker.interface';
 export * from './encode-audio-options.interface';
 export * from './encode-video-options.interface';
 export * from './input-audio-args.interface';

@@ -1,11 +1,11 @@
 import { Module } from '@nestjs/common';
-import { ConfigService } from '@nestjs/config';
 import { BullModule } from '@nestjs/bullmq';
 
 import { VideoService } from './video.service';
-import { VideoCosumerAV1, VideoCosumerH264, VideoCosumerVP9 } from './video.consumer';
+import { BaseVideoConsumer, VideoCosumerAV1, VideoCosumerH264, VideoCosumerVP9 } from './video.consumer';
 import { KamplexApiModule } from '../../common/modules/kamplex-api';
 import { TaskQueue, VideoCodec } from '../../enums';
+import { VideoController } from './video.controller';
 
 const targetConsumer = getTargetConsumer();
 
@@ -30,7 +30,14 @@ function getTargetConsumer() {
     }),
     KamplexApiModule
   ],
-  providers: [targetConsumer, VideoService],
-  exports: [VideoService]
+  providers: [
+    VideoService,
+    {
+      provide: BaseVideoConsumer,
+      useClass: targetConsumer
+    }
+  ],
+  exports: [VideoService],
+  controllers: [VideoController]
 })
 export class VideoModule { }

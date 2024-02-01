@@ -9,10 +9,46 @@ import { TaskQueue } from '../../enums/task-queue.enum';
 import { IVideoData } from './interfaces/video-data.interface';
 import { VideoCodec } from '../../enums/video-codec.enum';
 
-@Processor(`${TaskQueue.VIDEO_TRANSCODE}:${VideoCodec.H264}`, { concurrency: 1 })
-export class VideoCosumerH264 extends WorkerHost {
-  constructor(@Inject(WINSTON_MODULE_PROVIDER) private readonly logger: Logger, private readonly videoService: VideoService) {
+export abstract class BaseVideoConsumer extends WorkerHost {
+  constructor(@Inject(WINSTON_MODULE_PROVIDER) protected readonly logger: Logger) {
     super();
+  }
+
+  async pauseWorker(): Promise<void> {
+    if (this.worker.isPaused()) return;
+    await this.worker.pause();
+  }
+
+  resumeWorker(): void {
+    if (!this.worker.isPaused()) return;
+    this.worker.resume();
+  }
+
+  async closeWorker(): Promise<void> {
+    if (!this.worker.isRunning()) return;
+    await this.worker.close();
+  }
+
+  @OnWorkerEvent('paused')
+  onPaused() {
+    this.logger.info('Worker has been paused');
+  }
+
+  @OnWorkerEvent('resumed')
+  onResumed() {
+    this.logger.info('Worker has been resumed');
+  }
+
+  @OnWorkerEvent('closed')
+  onClosed() {
+    this.logger.info('Worker has been closed');
+  }
+}
+
+@Processor(`${TaskQueue.VIDEO_TRANSCODE}:${VideoCodec.H264}`, { concurrency: 1 })
+export class VideoCosumerH264 extends BaseVideoConsumer {
+  constructor(@Inject(WINSTON_MODULE_PROVIDER) protected readonly logger: Logger, private readonly videoService: VideoService) {
+    super(logger);
   }
 
   async process(job: Job<IVideoData, any, string>) {
@@ -27,9 +63,9 @@ export class VideoCosumerH264 extends WorkerHost {
 }
 
 @Processor(`${TaskQueue.VIDEO_TRANSCODE}:${VideoCodec.VP9}`, { concurrency: 1 })
-export class VideoCosumerVP9 extends WorkerHost {
-  constructor(@Inject(WINSTON_MODULE_PROVIDER) private readonly logger: Logger, private readonly videoService: VideoService) {
-    super();
+export class VideoCosumerVP9 extends BaseVideoConsumer {
+  constructor(@Inject(WINSTON_MODULE_PROVIDER) protected readonly logger: Logger, private readonly videoService: VideoService) {
+    super(logger);
   }
 
   async process(job: Job<IVideoData, any, string>) {
@@ -44,9 +80,9 @@ export class VideoCosumerVP9 extends WorkerHost {
 }
 
 @Processor(`${TaskQueue.VIDEO_TRANSCODE}:${VideoCodec.AV1}`, { concurrency: 1 })
-export class VideoCosumerAV1 extends WorkerHost {
-  constructor(@Inject(WINSTON_MODULE_PROVIDER) private readonly logger: Logger, private readonly videoService: VideoService) {
-    super();
+export class VideoCosumerAV1 extends BaseVideoConsumer {
+  constructor(@Inject(WINSTON_MODULE_PROVIDER) protected readonly logger: Logger, private readonly videoService: VideoService) {
+    super(logger);
   }
 
   async process(job: Job<IVideoData, any, string>) {

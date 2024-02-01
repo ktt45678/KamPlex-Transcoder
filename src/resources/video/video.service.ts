@@ -231,7 +231,9 @@ export class VideoService {
     if (codec === VideoCodec.H264 /*&& manifest.manifest.audioTracks.length === 0*/) {
       this.logger.info('Processing audio');
       const defaultAudioTrack = audioTracks.find(a => a.disposition.default) || audioTracks[0];
-      const allowedAudioTracks = new Set(job.data.advancedOptions?.selectAudioTracks || []).add(defaultAudioTrack.index);
+      const allowedAudioTracks = new Set(job.data.advancedOptions?.selectAudioTracks || []);
+      if (allowedAudioTracks.size === 0)
+        allowedAudioTracks.add(defaultAudioTrack.index);
 
       const audioNormalTrack = audioTracks.find(a => a.channels <= 2 && allowedAudioTracks.has(a.index));
       const audioSurroundTrack = audioTracks.find(a => a.channels > 2 && allowedAudioTracks.has(a.index));
