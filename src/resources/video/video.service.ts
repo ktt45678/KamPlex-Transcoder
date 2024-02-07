@@ -579,7 +579,7 @@ export class VideoService {
     this.logger.info(`Preparing media file: ${inputFileName}`);
     const inputFilePath = `${parsedInput.dir}/${inputFileName}`;
     const inputSourceFile = `${parsedInput.dir}/${job.data.filename}`;
-    const hasFreeSpace = await hasFreeSpaceToCopyFile(inputFilePath);
+    const hasFreeSpace = await hasFreeSpaceToCopyFile(inputFilePath, parsedInput.dir);
     if (!hasFreeSpace) {
       this.logger.warning(`Not enough disk space to duplicate file, deleting: ${job.data.filename} temporary`);
       await deleteFile(inputSourceFile);

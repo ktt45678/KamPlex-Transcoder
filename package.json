@@ -32,7 +32,7 @@
     "@nestjs/schedule": "4.0.0",
     "axios": "1.6.5",
     "bullmq": "4.17.0",
-    "diskusage": "1.2.0",
+    "check-disk-space": "3.4.0",
     "fast-xml-parser": "4.3.3",
     "ffprobe-client": "1.1.6",
     "ioredis": "5.3.2",
