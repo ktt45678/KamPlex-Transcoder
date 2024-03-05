@@ -1100,9 +1100,6 @@ export class VideoService {
   private async decryptToken(storage: IStorage) {
     const stringCrypto = new StringCrypto(this.configService.get<string>('CRYPTO_SECRET_KEY'));
     storage.clientSecret = await stringCrypto.decrypt(storage.clientSecret);
-    if (storage.accessToken)
-      storage.accessToken = await stringCrypto.decrypt(storage.accessToken);
-    storage.refreshToken = await stringCrypto.decrypt(storage.refreshToken);
     return storage;
   }
 
