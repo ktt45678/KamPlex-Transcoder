@@ -21,10 +21,8 @@ import { ENCODING_QUALITY, AUDIO_PARAMS, AUDIO_SURROUND_PARAMS, VIDEO_H264_PARAM
 import { HlsManifest, RcloneFile } from '../../common/interfaces';
 import { KamplexApiService } from '../../common/modules/kamplex-api';
 import {
-  createRcloneConfig, downloadFile, renameFile, deleteFile, deletePath, createSnowFlakeId, divideFromString, findInFile,
-  appendToFile, deleteFolder, generateSprites, parseProgress, progressPercent, MediaInfoResult, StringCrypto,
-  getMediaInfo, createH264Params, StreamManifest, hasFreeSpaceToCopyFile, trimSlugFilename, statFile, mkdirRemote, listRemoteJson,
-  readRemoteFile, emptyPath, fileExists, parseRcloneUploadProgress, findAllRemotes, refreshRemoteTokens, findH264ProfileLevel
+  createSnowFlakeId, diskSpaceUtil, ffmpegHelper, fileHelper, generateSprites, mediaInfoHelper, MediaInfoResult,
+  StringCrypto, stringHelper, StreamManifest, rcloneHelper
 } from '../../utils';
 
 type JobNameType = 'update-source' | 'add-stream-video' | 'add-stream-audio' | 'add-stream-manifest' | 'finished-encoding' |
@@ -91,7 +89,7 @@ export class VideoService {
     const transcodeDir = `${this.configService.get<string>('TRANSCODE_DIR')}/${job.id}`;
     const ffmpegDir = this.configService.get<string>('FFMPEG_DIR');
     const mediainfoDir = this.configService.get<string>('MEDIAINFO_DIR');
-    const trimmedFileName = job.data.linkedStorage ? trimSlugFilename(job.data.filename) : job.data.filename; // Trim saved file name
+    const trimmedFileName = job.data.linkedStorage ? stringHelper.trimSlugFilename(job.data.filename) : job.data.filename; // Trim saved file name
     const inputFile = `${transcodeDir}/${trimmedFileName}`;
     const parsedInput = path.parse(inputFile);
 
@@ -100,12 +98,12 @@ export class VideoService {
       await this.ensureRcloneConfigExist(rcloneConfigFile, job.data.linkedStorage, job);
 
     // Retry if the transcoder was interrupted before
-    const retryFromInterruption = await fileExists(transcodeDir);
+    const retryFromInterruption = await fileHelper.fileExists(transcodeDir);
     if (retryFromInterruption) {
       this.logger.notice('Transcode directory detected, maybe the transcoder was not exited properly before, cleaning up...');
       const status = { jobId: job.id, ...job.data };
       await this.videoResultQueue.add('retry-encoding', status);
-      await deleteFolder(transcodeDir);
+      await fileHelper.deleteFolder(transcodeDir);
     }
 
     let availableQualityList: number[] | null = null;
@@ -120,7 +118,7 @@ export class VideoService {
             return {}; // There's nothing to encode
         } finally {
           if (availableQualityList === null)
-            await deleteFolder(transcodeDir);
+            await fileHelper.deleteFolder(transcodeDir);
         }
       }
     }
@@ -130,26 +128,26 @@ export class VideoService {
 
     this.logger.info(`Downloading file from media id: ${job.data._id}`);
     try {
-      const downloadedFileStats = await statFile(inputFile);
+      const downloadedFileStats = await fileHelper.statFile(inputFile);
       if (!downloadedFileStats || downloadedFileStats.size !== job.data.size) {
         if (downloadedFileStats)
-          await deleteFile(inputFile); // Delete file if exist
+          await fileHelper.deleteFile(inputFile); // Delete file if exist
         const downloadStorage = job.data.linkedStorage || job.data.storage;
-        await downloadFile(rcloneConfigFile, rcloneDir, downloadStorage, job.data.path, job.data.filename, transcodeDir,
+        await rcloneHelper.downloadFile(rcloneConfigFile, rcloneDir, downloadStorage, job.data.path, job.data.filename, transcodeDir,
           !!job.data.linkedStorage, (args => {
             this.logger.info('rclone ' + args.join(' '));
           }));
         if (job.data.linkedStorage) {
           // Trim file name and create folder on remote
           await Promise.all([
-            renameFile(`${transcodeDir}/${job.data.filename}`, inputFile),
-            mkdirRemote(rcloneConfigFile, rcloneDir, job.data.storage, job.data._id)
+            fileHelper.renameFile(`${transcodeDir}/${job.data.filename}`, inputFile),
+            rcloneHelper.mkdirRemote(rcloneConfigFile, rcloneDir, job.data.storage, job.data._id)
           ]);
         }
       }
     } catch (e) {
       this.logger.error(e);
-      await deleteFolder(transcodeDir);
+      await fileHelper.deleteFolder(transcodeDir);
       const statusError = await this.generateStatusError(StatusCode.DOWNLOAD_FAILED, job);
       throw new Error(statusError.errorCode);
     }
@@ -158,10 +156,10 @@ export class VideoService {
     this.logger.info(`Processing input file: ${inputFile}`);
     try {
       videoInfo = await FFprobe(inputFile, { path: `${ffmpegDir}/ffprobe` });
-      videoMIInfo = await getMediaInfo(inputFile, mediainfoDir);
+      videoMIInfo = await mediaInfoHelper.getMediaInfo(inputFile, mediainfoDir);
     } catch (e) {
       this.logger.error(e);
-      await deleteFolder(transcodeDir);
+      await fileHelper.deleteFolder(transcodeDir);
       const statusError = await this.generateStatusError(StatusCode.PROBE_FAILED, job, { discard: true });
       throw new UnrecoverableError(statusError.errorCode);
     }
@@ -170,7 +168,7 @@ export class VideoService {
     const videoMITrack = videoMIInfo.media.track.find(s => s['@type'] === 'Video');
     if (!videoTrack || !videoMITrack) {
       this.logger.error('Video track not found');
-      await deleteFolder(transcodeDir);
+      await fileHelper.deleteFolder(transcodeDir);
       const statusError = await this.generateStatusError(StatusCode.NO_VIDEO_TRACK, job, { discard: true });
       throw new UnrecoverableError(statusError.errorCode);
     }
@@ -178,14 +176,14 @@ export class VideoService {
     const audioTracks = videoInfo.streams.filter(s => s.codec_type === 'audio');
     if (!audioTracks.length) {
       this.logger.error('Audio track not found');
-      await deleteFolder(transcodeDir);
+      await fileHelper.deleteFolder(transcodeDir);
       const statusError = await this.generateStatusError(StatusCode.NO_AUDIO_TRACK, job, { discard: true });
       throw new UnrecoverableError(statusError.errorCode);
     }
 
     const runtime = videoInfo.format.duration ? Math.trunc(+videoInfo.format.duration) : 0;
     const videoDuration = videoTrack.duration ? Math.trunc(+videoTrack.duration) : runtime;
-    const videoFps = Math.ceil(+videoMITrack.FrameRate) || Math.ceil(divideFromString(videoTrack.r_frame_rate));
+    const videoFps = Math.ceil(+videoMITrack.FrameRate) || Math.ceil(stringHelper.divideFromString(videoTrack.r_frame_rate));
     const videoBitrate = videoTrack.bit_rate ? Math.round(+videoTrack.bit_rate / 1000) :
       videoMITrack.BitRate ? Math.round(+videoMITrack.BitRate / 1000) : 0; // Bitrate in Kbps
     const videoCodec = videoTrack.codec_name || '';
@@ -201,7 +199,7 @@ export class VideoService {
           return {}; // There's nothing to encode
       } finally {
         if (availableQualityList === null)
-          await deleteFolder(transcodeDir);
+          await fileHelper.deleteFolder(transcodeDir);
       }
     }
 
@@ -277,7 +275,7 @@ export class VideoService {
         }
       } catch (e) {
         this.logger.error(JSON.stringify(e));
-        await deleteFolder(transcodeDir);
+        await fileHelper.deleteFolder(transcodeDir);
         if (e === RejectCode.JOB_CANCEL) {
           this.logger.info(`Received cancel signal from job id: ${job.id}`);
           return {};
@@ -333,7 +331,7 @@ export class VideoService {
       if (job.data.replaceStreams?.length) {
         this.logger.info('Removing old streams');
         for (let i = 0; i < job.data.replaceStreams.length; i++) {
-          await deletePath(rcloneConfigFile, rcloneDir,
+          await rcloneHelper.deletePath(rcloneConfigFile, rcloneDir,
             job.data.storage, `${job.data._id}/${job.data.replaceStreams[i]}`, (args => {
               this.logger.info('rclone ' + args.join(' '));
             }))
@@ -365,7 +363,7 @@ export class VideoService {
       throw new Error(statusError.errorCode);
     } finally {
       this.logger.info('Cleaning up');
-      await deleteFolder(transcodeDir);
+      await fileHelper.deleteFolder(transcodeDir);
       this.logger.info('Completed');
     }
     await this.kamplexApiService.ensureProducerAppIsOnline(job.data.producerUrl);
@@ -388,8 +386,9 @@ export class VideoService {
     this.logger.info('Audio codec: AAC');
     const audioDuration = audioTrack.duration ? Math.trunc(+audioTrack.duration) : 0;
     const audioChannels = audioTrack.channels || (type === 'normal' ? 2 : 0);
+    const audioTitle = audioTrack.tags['title'];
     await this.encodeAudio({
-      inputFile, parsedInput, sourceInfo: { duration: audioDuration, channels: audioChannels, language },
+      inputFile, parsedInput, sourceInfo: { duration: audioDuration, channels: audioChannels, language, title: audioTitle },
       audioTrackIndex: audioTrack.index, codec: aacType, isDefault, downmix, audioParams: audioAACParams,
       manifest, job
     });
@@ -397,7 +396,7 @@ export class VideoService {
     if (type === 'normal' || [5, 6, 7, 8].includes(audioChannels)) {
       this.logger.info('Audio codec: OPUS');
       await this.encodeAudio({
-        inputFile, parsedInput, sourceInfo: { duration: audioDuration, channels: audioChannels, language },
+        inputFile, parsedInput, sourceInfo: { duration: audioDuration, channels: audioChannels, language, title: audioTitle },
         audioTrackIndex: audioTrack.index, codec: opusType, isDefault: false, downmix, audioParams: audioOpusParams,
         manifest, job
       });
@@ -423,7 +422,8 @@ export class VideoService {
     this.logger.info(`Reading audio data: ${audioFileName}, ${mpdManifestFileName}, ${playlistFileName} and ${manifestFileName}`);
     const audioInfo = await FFprobe(`${parsedInput.dir}/${audioFileName}`, { path: `${this.configService.get<string>('FFMPEG_DIR')}/ffprobe` });
     const audioTrack = audioInfo.streams.find(s => s.codec_type === 'audio');
-    const audioMIInfo = await getMediaInfo(`${parsedInput.dir}/${audioFileName}`, this.configService.get<string>('MEDIAINFO_DIR'));
+    const audioMIInfo = await mediaInfoHelper.getMediaInfo(`${parsedInput.dir}/${audioFileName}`,
+      this.configService.get<string>('MEDIAINFO_DIR'));
     const audioMITrack = audioMIInfo.media.track.find(s => s['@type'] === 'Audio');
     if (!audioTrack || !audioMITrack)
       throw new Error('Failed to get encoded audio info');
@@ -434,6 +434,7 @@ export class VideoService {
       mimeType: 'audio/mp4',
       isDefault: isDefault,
       language: sourceInfo.language || audioMITrack.Language,
+      title: sourceInfo.title,
       channels: +audioMITrack.Channels || audioTrack.channels || 2,
       samplingRate: +audioMITrack.SamplingRate || +audioTrack.sample_rate || 0,
       codec: codec,
@@ -506,7 +507,8 @@ export class VideoService {
         await this.prepareMediaFile(videoFileName, parsedInput, `${videoBaseName}_temp`, manifestFileName, job);
 
         this.logger.info(`Reading video data: ${videoFileName}, ${mpdManifestFileName}, ${playlistFileName} and ${manifestFileName}`);
-        const videoMIInfo = await getMediaInfo(`${parsedInput.dir}/${videoFileName}`, this.configService.get<string>('MEDIAINFO_DIR'));
+        const videoMIInfo = await mediaInfoHelper.getMediaInfo(`${parsedInput.dir}/${videoFileName}`,
+          this.configService.get<string>('MEDIAINFO_DIR'));
         const generalMITrack = videoMIInfo.media.track.find(s => s['@type'] === 'General');
         const videoMITrack = videoMIInfo.media.track.find(s => s['@type'] === 'Video');
         if (!videoMITrack)
@@ -536,7 +538,7 @@ export class VideoService {
         this.logger.error(JSON.stringify(e));
         this.logger.info('Removing unprocessed file');
         try {
-          await deletePath(rcloneConfig, rcloneDir, job.data.storage, `${job.data._id}/${streamId}`, (args => {
+          await rcloneHelper.deletePath(rcloneConfig, rcloneDir, job.data.storage, `${job.data._id}/${streamId}`, (args => {
             this.logger.info('rclone ' + args.join(' '));
           }));
         } catch (e) {
@@ -567,9 +569,9 @@ export class VideoService {
     this.logger.info('Running scheduled token refresh');
     const rcloneDir = this.configService.get<string>('RCLONE_DIR');
     const rcloneConfig = this.configService.get<string>('RCLONE_CONFIG_FILE');
-    const remoteList = await findAllRemotes(rcloneConfig, rcloneDir);
+    const remoteList = await rcloneHelper.findAllRemotes(rcloneConfig, rcloneDir);
     if (!remoteList.length) return;
-    await refreshRemoteTokens(rcloneConfig, rcloneDir, remoteList, args => {
+    await rcloneHelper.refreshRemoteTokens(rcloneConfig, rcloneDir, remoteList, args => {
       this.logger.info('rclone ' + args.join(' '));
     });
   }
@@ -579,23 +581,23 @@ export class VideoService {
     this.logger.info(`Preparing media file: ${inputFileName}`);
     const inputFilePath = `${parsedInput.dir}/${inputFileName}`;
     const inputSourceFile = `${parsedInput.dir}/${job.data.filename}`;
-    const hasFreeSpace = await hasFreeSpaceToCopyFile(inputFilePath, parsedInput.dir);
+    const hasFreeSpace = await diskSpaceUtil.hasFreeSpaceToCopyFile(inputFilePath, parsedInput.dir);
     if (!hasFreeSpace) {
       this.logger.warning(`Not enough disk space to duplicate file, deleting: ${job.data.filename} temporary`);
-      await deleteFile(inputSourceFile);
+      await fileHelper.deleteFile(inputSourceFile);
     }
     const mp4boxPackArgs = this.createMP4BoxPackArgs(inputFilePath, parsedInput, tempFileName, playlistName);
     await this.packageMedia(mp4boxPackArgs, job.id);
-    await deleteFile(inputFilePath);
+    await fileHelper.deleteFile(inputFilePath);
     const tempFilePath = `${parsedInput.dir}/${tempFileName}.mp4`;
-    await renameFile(tempFilePath, inputFilePath);
+    await fileHelper.renameFile(tempFilePath, inputFilePath);
     if (!hasFreeSpace) {
       this.logger.info(`Redownloading: ${job.data.filename}`);
       const rcloneDir = this.configService.get<string>('RCLONE_DIR');
       const rcloneConfigFile = this.configService.get<string>('RCLONE_CONFIG_FILE');
       const downloadStorage = job.data.linkedStorage || job.data.storage;
-      await downloadFile(rcloneConfigFile, rcloneDir, downloadStorage, job.data.path, job.data.filename, parsedInput.dir,
-        !!job.data.linkedStorage,
+      await rcloneHelper.downloadFile(rcloneConfigFile, rcloneDir, downloadStorage, job.data.path, job.data.filename,
+        parsedInput.dir, !!job.data.linkedStorage,
         (args => {
           this.logger.info('rclone ' + args.join(' '));
         }));
@@ -771,13 +773,13 @@ export class VideoService {
     }
     if (quality >= 1440) {
       // Find the best h264 profile level for > 2k resolution
-      const level = findH264ProfileLevel(sourceInfo.width, sourceInfo.height, quality, sourceInfo.fps);
+      const level = ffmpegHelper.findH264ProfileLevel(sourceInfo.width, sourceInfo.height, quality, sourceInfo.fps);
       if (level !== null) {
         args.push('-level:v', level);
       }
     }
     if (sourceInfo.sourceH264Params) {
-      const x264Params = createH264Params(sourceInfo.sourceH264Params, sourceInfo.height === quality);
+      const x264Params = mediaInfoHelper.createH264Params(sourceInfo.sourceH264Params, sourceInfo.height === quality);
       args.push('-x264-params', `"${x264Params}"`);
     }
   }
@@ -833,8 +835,8 @@ export class VideoService {
 
       ffmpeg.stdout.setEncoding('utf8');
       ffmpeg.stdout.on('data', async (data: string) => {
-        const progress = parseProgress(data);
-        const percent = progressPercent(progress.outTimeMs, videoDuration * 1000000);
+        const progress = ffmpegHelper.parseProgress(data);
+        const percent = ffmpegHelper.progressPercent(progress.outTimeMs, videoDuration * 1000000);
         stdout.write(`Encoding: ${percent}% - frame: ${progress.frame || 'N/A'} - fps: ${progress.fps || 'N/A'} - bitrate: ${progress.bitrate} - time: ${progress.outTime}\r`);
       });
 
@@ -903,7 +905,7 @@ export class VideoService {
 
       rclone.stderr.setEncoding('utf8');
       rclone.stderr.on('data', (data) => {
-        const progress = parseRcloneUploadProgress(data);
+        const progress = rcloneHelper.parseRcloneUploadProgress(data);
         if (progress)
           stdout.write(`${progress.msg}\r`);
       });
@@ -987,7 +989,7 @@ export class VideoService {
   }
 
   private async ensureRcloneConfigExist(configFile: string, storage: string, job: Job<IVideoData>) {
-    const configExists = await findInFile(configFile, `[${storage}]`);
+    const configExists = await fileHelper.findInFile(configFile, `[${storage}]`);
     if (!configExists) {
       this.logger.info(`Config for remote "${storage}" not found, generating...`);
       let externalStorage = await externalStorageModel.findOne({ _id: BigInt(storage) }).lean().exec();
@@ -996,8 +998,8 @@ export class VideoService {
         throw new Error(statusError.errorCode);
       }
       externalStorage = await this.decryptToken(externalStorage);
-      const newConfig = createRcloneConfig(externalStorage);
-      await appendToFile(configFile, newConfig);
+      const newConfig = rcloneHelper.createRcloneConfig(externalStorage);
+      await fileHelper.appendToFile(configFile, newConfig);
       this.logger.info(`Generated config for remote "${storage}"`);
     }
   }
@@ -1069,7 +1071,7 @@ export class VideoService {
       const rcloneConfigFile = this.configService.get<string>('RCLONE_CONFIG_FILE');
       const rcloneDir = this.configService.get<string>('RCLONE_DIR');
       this.logger.info('Cleanning source folder');
-      await emptyPath(rcloneConfigFile, rcloneDir, job.data.storage, `${job.data._id}/*`, args => {
+      await rcloneHelper.emptyPath(rcloneConfigFile, rcloneDir, job.data.storage, `${job.data._id}/*`, args => {
         this.logger.info('rclone ' + args.join(' '));
       }, {
         include: '*/**'
@@ -1081,7 +1083,7 @@ export class VideoService {
   private async findExistingManifest(remote: string, parentFolder: string, codec: number) {
     const rcloneConfigFile = this.configService.get<string>('RCLONE_CONFIG_FILE');
     const rcloneDir = this.configService.get<string>('RCLONE_DIR');
-    const [manifestFileInfo] = await listRemoteJson(rcloneConfigFile, rcloneDir, remote, parentFolder, {
+    const [manifestFileInfo] = await rcloneHelper.listRemoteJson(rcloneConfigFile, rcloneDir, remote, parentFolder, {
       filesOnly: true,
       recursive: true,
       include: `*/manifest_${codec}.json`
@@ -1089,9 +1091,10 @@ export class VideoService {
     if (!manifestFileInfo)
       return null;
     this.logger.info(`Found existing manifest from ${manifestFileInfo.Path}, reading data...`);
-    const manifestContent = await readRemoteFile(rcloneConfigFile, rcloneDir, remote, parentFolder, manifestFileInfo.Path, args => {
-      this.logger.info('rclone ' + args.join(' '));
-    });
+    const manifestContent = await rcloneHelper.readRemoteFile(rcloneConfigFile, rcloneDir, remote, parentFolder,
+      manifestFileInfo.Path, args => {
+        this.logger.info('rclone ' + args.join(' '));
+      });
     if (!manifestContent)
       return null;
     return <HlsManifest>JSON.parse(manifestContent);

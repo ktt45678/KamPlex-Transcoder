@@ -46,4 +46,5 @@ export interface AudioSourceInfo {
   duration: number;
   channels: number;
   language?: string | null;
+  title?: string;
 }

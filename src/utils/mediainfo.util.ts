@@ -1,64 +1,68 @@
 import child_process from 'child_process';
 
-const KNWON_ENCODING_SETTINGS = ['cabac', 'ref', 'deblock', 'analyse', 'me', 'subme', 'psy', 'psy_rd', 'mixed_ref', 'me_range',
-  'chroma_me', 'trellis', '8x8dct', 'deadzone', 'fast_pskip', 'nr', 'decimate', 'interlaced', 'constrained_intra',
-  'bframes', 'b_pyramid', 'b_adapt', 'b_bias', 'direct', 'weightb', 'weightp', 'scenecut', 'intra_refresh', 'rc_lookahead', 'mbtree',
-  'nal_hrd', 'filler', 'ip_ratio', 'aq'
-];
-
-const MULTI_RES_ENCODING_SETTINGS = ['cabac', 'ref', 'deblock', 'analyse', 'me', 'subme', 'psy', 'psy_rd', 'mixed_ref', 'me_range',
-  'trellis', '8x8dct', 'deadzone', 'fast_pskip', 'nr', 'decimate', 'interlaced', 'constrained_intra', 'bframes',
-  'b_pyramid', 'b_bias', 'weightb', 'weightp', 'scenecut', 'intra_refresh', 'rc_lookahead', 'mbtree',
-  'nal_hrd', 'filler', 'ip_ratio', 'aq'
-];
-
-export function getMediaInfo(input: string, mediainfoDir: string) {
-  const args: string[] = [
-    `"${input}"`,
-    '--output=JSON'
+export class MediaInfoHelper {
+  knwonEncodingSettings = ['cabac', 'ref', 'deblock', 'analyse', 'me', 'subme', 'psy', 'psy_rd', 'mixed_ref', 'me_range',
+    'chroma_me', 'trellis', '8x8dct', 'deadzone', 'fast_pskip', 'nr', 'decimate', 'interlaced', 'constrained_intra',
+    'bframes', 'b_pyramid', 'b_adapt', 'b_bias', 'direct', 'weightb', 'weightp', 'scenecut', 'intra_refresh', 'rc_lookahead', 'mbtree',
+    'nal_hrd', 'filler', 'ip_ratio', 'aq'
   ];
-  return new Promise<MediaInfoResult>((resolve, reject) => {
-    const mediainfo = child_process.spawn(`"${mediainfoDir}/mediainfo"`, args, { shell: true });
-    let infoJson = '';
-    let errorMessage = '';
-    mediainfo.stdout.setEncoding('utf8');
-    mediainfo.stdout.on('data', (data) => {
-      infoJson += data;
-    });
-    mediainfo.stderr.setEncoding('utf8');
-    mediainfo.stderr.on('data', (data) => {
-      errorMessage += data + '\n';
-    });
 
-    mediainfo.on('exit', (code: number) => {
-      if (code !== 0) {
-        reject({ code: code, message: errorMessage });
-      } else {
-        const fileData = JSON.parse(infoJson);
-        resolve(fileData);
-      }
-    });
-  });
-}
+  multiResEncodingSettings = ['cabac', 'ref', 'deblock', 'analyse', 'me', 'subme', 'psy', 'psy_rd', 'mixed_ref', 'me_range',
+    'trellis', '8x8dct', 'deadzone', 'fast_pskip', 'nr', 'decimate', 'interlaced', 'constrained_intra', 'bframes',
+    'b_pyramid', 'b_bias', 'weightb', 'weightp', 'scenecut', 'intra_refresh', 'rc_lookahead', 'mbtree',
+    'nal_hrd', 'filler', 'ip_ratio', 'aq'
+  ];
 
-export function createH264Params(encodedLibrarySettings: string, sameRes: boolean = false) {
-  if (!encodedLibrarySettings) return '';
-  const settingList = encodedLibrarySettings.replace(/:/g, '\\:').split(' / ');
-  const encodingSettings = sameRes ? KNWON_ENCODING_SETTINGS : MULTI_RES_ENCODING_SETTINGS;
-  const filteredList = settingList.filter(value => {
-    const key = value.split('=')[0];
-    if (encodingSettings.indexOf(key) > -1)
-      return true
+  getMediaInfo(input: string, mediainfoDir: string) {
+    const args: string[] = [
+      `"${input}"`,
+      '--output=JSON'
+    ];
+    return new Promise<MediaInfoResult>((resolve, reject) => {
+      const mediainfo = child_process.spawn(`"${mediainfoDir}/mediainfo"`, args, { shell: true });
+      let infoJson = '';
+      let errorMessage = '';
+      mediainfo.stdout.setEncoding('utf8');
+      mediainfo.stdout.on('data', (data) => {
+        infoJson += data;
+      });
+      mediainfo.stderr.setEncoding('utf8');
+      mediainfo.stderr.on('data', (data) => {
+        errorMessage += data + '\n';
+      });
+
+      mediainfo.on('exit', (code: number) => {
+        if (code !== 0) {
+          reject({ code: code, message: errorMessage });
+        } else {
+          const fileData = JSON.parse(infoJson);
+          resolve(fileData);
+        }
+      });
+    });
+  }
+
+  createH264Params(encodedLibrarySettings: string, sameRes: boolean = false) {
+    if (!encodedLibrarySettings) return '';
+    const settingList = encodedLibrarySettings.replace(/:/g, '\\:').split(' / ');
+    const encodingSettings = sameRes ? this.knwonEncodingSettings : this.knwonEncodingSettings;
+    const filteredList = settingList.filter(value => {
+      const key = value.split('=')[0];
+      if (encodingSettings.indexOf(key) > -1)
+        return true
+      return false;
+    });
+    return filteredList.join(':');
+  }
+
+  isHDRVideo(colorSpace: string, colorTransfer: string, colorPrimaries: string) {
+    if (colorSpace === 'bt2020nc' && colorTransfer === 'smpte2084' && colorPrimaries === 'bt2020')
+      return true;
     return false;
-  });
-  return filteredList.join(':');
+  }
 }
 
-export function isHDRVideo(colorSpace: string, colorTransfer: string, colorPrimaries: string) {
-  if (colorSpace === 'bt2020nc' && colorTransfer === 'smpte2084' && colorPrimaries === 'bt2020')
-    return true;
-  return false;
-}
+export const mediaInfoHelper = new MediaInfoHelper();
 
 export interface MediaInfoResult {
   creatingLibrary: CreatingLibraryInfo;

@@ -8,9 +8,9 @@ import path from 'path';
 import fs from 'fs';
 import child_process from 'child_process';
 
-import { parseProgress, progressPercent } from './ffmpeg-helper.util';
+import { ffmpegHelper } from './ffmpeg-helper.util';
 import { RejectCode } from '../enums/reject-code.enum';
-import { fileExists } from './file-helper.util';
+import { fileHelper } from './file-helper.util';
 import { rgbaToThumbHash } from './thumbhash.util';
 
 type OutputImageFormat = 'webp' | 'jpeg' | 'avif';
@@ -167,7 +167,7 @@ export async function generateSprites(options: InputOptions, generatorOptionsLis
     const jsonThumb: ThumbnailFrame[] = [];
 
     const firstThumbPath = path.join(tempPath, 'thumb_1.png');
-    if (await fileExists(firstThumbPath)) {
+    if (await fileHelper.fileExists(firstThumbPath)) {
       const thumbMetadata = await sharp(firstThumbPath).metadata();
       if (thumbMetadata.width && thumbMetadata.height) {
         const scaledSizes = getScaledSizes(thumbMetadata.width, thumbMetadata.height, tw, th);
@@ -308,9 +308,9 @@ function generateThumbnails(inputFile: string, outputFolder: string, maxWidth: n
 
     ffmpeg.stdout.setEncoding('utf8');
     ffmpeg.stdout.on('data', async (data: string) => {
-      const progress = parseProgress(data);
+      const progress = ffmpegHelper.parseProgress(data);
       generatedFrames = progress.frame || 0;
-      const percent = progressPercent(progress.outTimeMs, input.duration * 1000000);
+      const percent = ffmpegHelper.progressPercent(progress.outTimeMs, input.duration * 1000000);
       stdout.write(`Encoding: ${percent}% - frame: ${progress.frame || 'N/A'} - fps: ${progress.fps || 'N/A'} - bitrate: ${progress.bitrate} - time: ${progress.outTime}\r`);
     });
 

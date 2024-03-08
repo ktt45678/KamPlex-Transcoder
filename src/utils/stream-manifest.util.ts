@@ -65,9 +65,9 @@ export class StreamManifest {
 
   async appendAudioPlaylist(options: {
     mpdPath: string, m3u8PlaylistPath: string, format: string, mimeType: string, isDefault: boolean,
-    language: string, channels: number, samplingRate: number, codec: number, uri: string
+    language: string, title?: string, channels: number, samplingRate: number, codec: number, uri: string
   }) {
-    const { mpdPath, m3u8PlaylistPath, format, mimeType, isDefault, language = 'en', channels, samplingRate, codec, uri } = options;
+    const { mpdPath, m3u8PlaylistPath, format, mimeType, isDefault, language = 'en', title, channels, samplingRate, codec, uri } = options;
     const mpd = await fs.promises.readFile(mpdPath, { encoding: 'utf8' });
     const xmlParser = new XMLParser({ ignoreAttributes: false, attributeNamePrefix: '', allowBooleanAttributes: true, ignoreDeclaration: true, parseAttributeValue: true });
     const mpdManifest = <ParsedXMLMPD>xmlParser.parse(mpd);
@@ -80,6 +80,7 @@ export class StreamManifest {
       default: isDefault,
       autoselect: isDefault,
       language: language,
+      title: title,
       format: format,
       channels: channels,
       samplingRate: samplingRate,
