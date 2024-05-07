@@ -37,10 +37,16 @@ export interface VideoSourceInfo {
   width: number;
   height: number;
   language: string | null;
+  isHDR: boolean;
   sourceH264Params: string;
 }
 
 export interface AdvancedVideoSettings {
   h264Tune?: string;
   overrideSettings?: IEncodingSetting[];
+}
+
+export interface ResolveVideoFiltersOptions {
+  quality?: number;
+  hdrTonemap?: boolean;
 }

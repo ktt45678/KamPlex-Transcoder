@@ -1,5 +1,7 @@
 import child_process from 'child_process';
 
+import { stringHelper } from './string-helper.util';
+
 export class MediaInfoHelper {
   knwonEncodingSettings = ['cabac', 'ref', 'deblock', 'analyse', 'me', 'subme', 'psy', 'psy_rd', 'mixed_ref', 'me_range',
     'chroma_me', 'trellis', '8x8dct', 'deadzone', 'fast_pskip', 'nr', 'decimate', 'interlaced', 'constrained_intra',
@@ -59,6 +61,24 @@ export class MediaInfoHelper {
     if (colorSpace === 'bt2020nc' && colorTransfer === 'smpte2084' && colorPrimaries === 'bt2020')
       return true;
     return false;
+  }
+
+  getVideoFrameRate(avgFrameRate: string, rFrameRate: string, mediainfoFrameRate: string) {
+    if (avgFrameRate) {
+      if (avgFrameRate.includes('/')) {
+        return Math.ceil(stringHelper.divideFromString(avgFrameRate));
+      }
+      return Math.ceil(+avgFrameRate);
+    }
+    if (rFrameRate) {
+      if (rFrameRate.includes('/')) {
+        return Math.ceil(stringHelper.divideFromString(rFrameRate));
+      }
+      return Math.ceil(+rFrameRate);
+    }
+    if (mediainfoFrameRate) {
+      return Math.ceil(+mediainfoFrameRate);
+    }
   }
 }
 

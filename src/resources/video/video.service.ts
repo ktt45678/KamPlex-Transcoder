@@ -15,7 +15,7 @@ import { externalStorageModel } from '../../models/external-storage.model';
 import { mediaStorageModel } from '../../models/media-storage.model';
 import { settingModel } from '../../models/setting.model';
 import { mediaModel } from '../../models/media.model';
-import { IVideoData, IJobData, IStorage, IEncodingSetting, MediaQueueResult, EncodeAudioOptions, EncodeVideoOptions, VideoSourceInfo, CreateAudioEncodingArgsOptions, CreateVideoEncodingArgsOptions, EncodeAudioByTrackOptions, AdvancedVideoSettings } from './interfaces';
+import { IVideoData, IJobData, IStorage, IEncodingSetting, MediaQueueResult, EncodeAudioOptions, EncodeVideoOptions, VideoSourceInfo, CreateAudioEncodingArgsOptions, CreateVideoEncodingArgsOptions, EncodeAudioByTrackOptions, AdvancedVideoSettings, ResolveVideoFiltersOptions } from './interfaces';
 import { AudioCodec, StatusCode, VideoCodec, RejectCode, TaskQueue } from '../../enums';
 import { ENCODING_QUALITY, AUDIO_PARAMS, AUDIO_SURROUND_PARAMS, VIDEO_H264_PARAMS, VIDEO_VP9_PARAMS, VIDEO_AV1_PARAMS, AUDIO_SPEED_PARAMS, AUDIO_SURROUND_OPUS_PARAMS } from '../../config';
 import { HlsManifest, RcloneFile } from '../../common/interfaces';
@@ -183,7 +183,7 @@ export class VideoService {
 
     const runtime = videoInfo.format.duration ? Math.trunc(+videoInfo.format.duration) : 0;
     const videoDuration = videoTrack.duration ? Math.trunc(+videoTrack.duration) : runtime;
-    const videoFps = Math.ceil(+videoMITrack.FrameRate) || Math.ceil(stringHelper.divideFromString(videoTrack.r_frame_rate));
+    const videoFps = mediaInfoHelper.getVideoFrameRate(videoTrack.avg_frame_rate, videoTrack.r_frame_rate, videoMITrack.FrameRate);
     const videoBitrate = videoTrack.bit_rate ? Math.round(+videoTrack.bit_rate / 1000) :
       videoMITrack.BitRate ? Math.round(+videoMITrack.BitRate / 1000) : 0; // Bitrate in Kbps
     const videoCodec = videoTrack.codec_name || '';
@@ -286,9 +286,10 @@ export class VideoService {
     }
 
     try {
+      const isHDRVideo = mediaInfoHelper.isHDRVideo(videoTrack.color_space, videoTrack.color_transfer, videoTrack.color_primaries);
       const sourceInfo: VideoSourceInfo = {
         duration: videoDuration, fps: videoFps, bitrate: videoBitrate, codec: videoCodec, sourceH264Params: videoSourceH264Params,
-        width: srcWidth, height: srcHeight, language: mediaInfo.originalLang
+        width: srcWidth, height: srcHeight, language: mediaInfo.originalLang, isHDR: isHDRVideo
       };
       if (codec === VideoCodec.H264) {
         this.logger.info('Video codec: H264');
@@ -669,6 +670,7 @@ export class VideoService {
   private createVideoEncodingArgs(options: CreateVideoEncodingArgsOptions) {
     const { inputFile, parsedInput, codec, quality, videoParams, sourceInfo, crfKey, advancedSettings, encodingSetting } = options;
     const gopSize = (sourceInfo.fps ? sourceInfo.fps * 2 : 48).toString();
+    const videoFilters = this.resolveVideoFilters({ quality, hdrTonemap: sourceInfo.isHDR });
     const args: string[] = [
       '-hide_banner', '-y',
       '-progress', 'pipe:1',
@@ -687,7 +689,7 @@ export class VideoService {
       '-map', '0:v:0',
       //'-map_metadata', '-1',
       '-map_chapters', '-1',
-      '-vf', `scale=-2:${quality}`,
+      '-vf', videoFilters,
       //'-movflags', '+faststart',
       '-f', 'mp4',
       `"${parsedInput.dir}/${parsedInput.name}_${quality}.mp4"`
@@ -698,6 +700,7 @@ export class VideoService {
   private createTwoPassesVideoEncodingArgs(options: CreateVideoEncodingArgsOptions & { pass: number }) {
     const { inputFile, parsedInput, codec, quality, videoParams, sourceInfo, crfKey, advancedSettings, encodingSetting, pass } = options;
     const gopSize = (sourceInfo.fps ? sourceInfo.fps * 2 : 48).toString();
+    const videoFilters = this.resolveVideoFilters({ quality, hdrTonemap: false });
     if (pass === 1) {
       const outputName = process.platform === 'win32' ? 'NUL' : '/dev/null';
       const args = [
@@ -716,7 +719,7 @@ export class VideoService {
         this.resolveH264Params(args, advancedSettings, quality, sourceInfo);
       args.push(
         '-map', '0:v:0',
-        '-vf', `scale=-2:${quality}`,
+        '-vf', videoFilters,
         //'-movflags', '+faststart',
         '-passlogfile', `"${parsedInput.dir}/${parsedInput.name}_2pass.log"`,
         '-pass', '1', '-an',
@@ -742,7 +745,7 @@ export class VideoService {
       '-map', '0:v:0',
       //'-map_metadata', '-1',
       '-map_chapters', '-1',
-      '-vf', `scale=-2:${quality}`,
+      '-vf', videoFilters,
       //'-movflags', '+faststart',
       '-passlogfile', `"${parsedInput.dir}/${parsedInput.name}_2pass.log"`,
       '-pass', '2',
@@ -782,6 +785,17 @@ export class VideoService {
       const x264Params = mediaInfoHelper.createH264Params(sourceInfo.sourceH264Params, sourceInfo.height === quality);
       args.push('-x264-params', `"${x264Params}"`);
     }
+  }
+
+  private resolveVideoFilters(options: ResolveVideoFiltersOptions) {
+    const videoFilters: string[] = [];
+    if (options.quality) {
+      videoFilters.push(`scale=-2:${options.quality}`);
+    }
+    if (options.hdrTonemap) {
+      videoFilters.push('zscale=t=linear:npl=100,format=gbrpf32le,tonemap=tonemap=mobius:desat=0,zscale=p=bt709:t=bt709:m=bt709:r=tv:d=error_diffusion,format=yuv420p');
+    }
+    return videoFilters.join(',');
   }
 
   private createMP4BoxPackArgs(input: string, parsedInput: path.ParsedPath, tempFileName: string, playlistName: string) {

@@ -1,5 +1,9 @@
 {
   "collection": "@nestjs/schematics",
   "sourceRoot": "src",
-  "manualRestart": true
+  "manualRestart": true,
+  "compilerOptions": {
+    "builder": "swc",
+    "typeCheck": true
+  }
 }
