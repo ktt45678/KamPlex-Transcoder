@@ -580,11 +580,13 @@ export class VideoService {
   private async prepareMediaFile(inputFileName: string, parsedInput: path.ParsedPath, tempFileName: string, playlistName: string,
     job: Job<IVideoData>) {
     this.logger.info(`Preparing media file: ${inputFileName}`);
+    // Trim saved file name
+    const trimmedFileName = job.data.linkedStorage ? stringHelper.trimSlugFilename(job.data.filename) : job.data.filename;
     const inputFilePath = `${parsedInput.dir}/${inputFileName}`;
-    const inputSourceFile = `${parsedInput.dir}/${job.data.filename}`;
+    const inputSourceFile = `${parsedInput.dir}/${trimmedFileName}`;
     const hasFreeSpace = await diskSpaceUtil.hasFreeSpaceToCopyFile(inputFilePath, parsedInput.dir);
     if (!hasFreeSpace) {
-      this.logger.warning(`Not enough disk space to duplicate file, deleting: ${job.data.filename} temporary`);
+      this.logger.warning(`Not enough disk space to duplicate file, deleting: ${trimmedFileName} temporary`);
       await fileHelper.deleteFile(inputSourceFile);
     }
     const mp4boxPackArgs = this.createMP4BoxPackArgs(inputFilePath, parsedInput, tempFileName, playlistName);
@@ -602,6 +604,10 @@ export class VideoService {
         (args => {
           this.logger.info('rclone ' + args.join(' '));
         }));
+      if (job.data.linkedStorage) {
+        // Set trimmed file name
+        await fileHelper.renameFile(`${parsedInput.dir}/${job.data.filename}`, inputSourceFile);
+      }
     }
   }
 
