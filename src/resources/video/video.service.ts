@@ -1047,11 +1047,11 @@ export class VideoService {
     return availableQualityList;
   }
 
-  private calculateQuality(height: number, qualityList: number[]) {
+  private calculateQuality(height: number, qualityList: number[], forcedQualityList: number[] = []) {
     const availableQualityList: number[] = [];
     if (!height) return availableQualityList;
     for (let i = 0; i < qualityList.length; i++) {
-      if (height >= qualityList[i]) {
+      if (height >= qualityList[i] || forcedQualityList.includes(qualityList[i])) {
         availableQualityList.push(qualityList[i]);
       }
     }
@@ -1063,7 +1063,8 @@ export class VideoService {
 
   private async validateSourceQuality(parsedInput: path.ParsedPath, quality: number, qualityList: number[], codec: number,
     retryFromInterruption: boolean, job: Job<IVideoData>): Promise<number[] | null> {
-    const allQualityList = this.calculateQuality(quality, qualityList);
+    const forcedQualityList = job.data.advancedOptions?.forceVideoQuality || [];
+    const allQualityList = this.calculateQuality(quality, qualityList, forcedQualityList);
     this.logger.info(`All quality: ${allQualityList.length ? allQualityList.join(', ') : 'None'}`);
     if (!allQualityList.length) {
       const statusError = await this.generateStatusError(StatusCode.LOW_QUALITY_VIDEO, job, { discard: true });
