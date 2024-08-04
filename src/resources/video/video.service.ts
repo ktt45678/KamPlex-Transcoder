@@ -318,6 +318,7 @@ export class VideoService {
         source: inputFile,
         output: `${parsedInput.dir}/${this.thumbnailFolder}`,
         duration: videoDuration,
+        isHDR: isHDRVideo,
         ffmpegDir,
         jobId: job.id,
         canceledJobIds: this.CanceledJobIds

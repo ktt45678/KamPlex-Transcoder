@@ -25,6 +25,9 @@ interface InputOptions {
   /** Length of the video in seconds. */
   duration: number;
 
+  /** Is HDR Video. */
+  isHDR: boolean;
+
   /** Path to FFmpeg Folder */
   ffmpegDir: string;
 
@@ -290,12 +293,20 @@ function generateThumbnails(inputFile: string, outputFolder: string, maxWidth: n
   return new Promise<number>((resolve, reject) => {
     let isCancelled = false;
 
+    // Thumbnail filter
+    const videoFilters = [
+      `fps=1/1,scale=if(gte(iw\\,ih)\\,min(${maxWidth}\\,iw)\\,-2):if(lt(iw\\,ih)\\,min(${maxHeight}\\,ih)\\,-2)`
+    ];
+    // HDR tonemap filter
+    if (input.isHDR)
+      videoFilters.push('zscale=t=linear:npl=100,format=gbrpf32le,tonemap=tonemap=mobius:desat=0,zscale=p=bt709:t=bt709:m=bt709:r=tv:d=error_diffusion,format=yuv420p');
+
     const args = [
       '-hide_banner', '-y',
       '-progress', 'pipe:1',
       '-loglevel', 'error',
       '-i', `"${inputFile}"`,
-      '-vf', `"fps=1/1,scale=if(gte(iw\\,ih)\\,min(${maxWidth}\\,iw)\\,-2):if(lt(iw\\,ih)\\,min(${maxHeight}\\,ih)\\,-2)"`,
+      '-vf', `"${videoFilters.join(',')}"`,
       '-qmin', '1',
       '-qscale:v', '1',
       '-f', 'image2',
