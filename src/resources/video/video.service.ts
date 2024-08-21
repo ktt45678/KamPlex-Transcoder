@@ -392,7 +392,7 @@ export class VideoService {
     this.logger.info('Audio codec: AAC');
     const audioDuration = audioTrack.duration ? Math.trunc(+audioTrack.duration) : 0;
     const audioChannels = audioTrack.channels || (type === 'normal' ? 2 : 0);
-    const audioTitle = audioTrack.tags['title'];
+    const audioTitle = audioTrack.tags?.title || null;
     await this.encodeAudio({
       inputFile, parsedInput, sourceInfo: { duration: audioDuration, channels: audioChannels, language, title: audioTitle },
       audioTrackIndex: audioTrack.index, codec: aacType, isDefault, downmix, audioParams: audioAACParams,
