@@ -146,6 +146,7 @@ export class VideoService {
         }
       }
     } catch (e) {
+      console.error(e);
       this.logger.error(e);
       await fileHelper.deleteFolder(transcodeDir);
       const statusError = await this.generateStatusError(StatusCode.DOWNLOAD_FAILED, job);
@@ -158,6 +159,7 @@ export class VideoService {
       videoInfo = await FFprobe(inputFile, { path: `${ffmpegDir}/ffprobe` });
       videoMIInfo = await mediaInfoHelper.getMediaInfo(inputFile, mediainfoDir);
     } catch (e) {
+      console.error(e);
       this.logger.error(e);
       await fileHelper.deleteFolder(transcodeDir);
       const statusError = await this.generateStatusError(StatusCode.PROBE_FAILED, job, { discard: true });
@@ -274,6 +276,7 @@ export class VideoService {
           });
         }
       } catch (e) {
+        console.error(e);
         this.logger.error(JSON.stringify(e));
         await fileHelper.deleteFolder(transcodeDir);
         if (e === RejectCode.JOB_CANCEL) {
@@ -354,6 +357,7 @@ export class VideoService {
       }
       this.logger.info(`${uploadedFiles.length}/${totalExpectedFiles} files uploaded`);
     } catch (e) {
+      console.error(e);
       this.logger.error(JSON.stringify(e));
       if (e === RejectCode.JOB_CANCEL) {
         this.logger.info(`Received cancel signal from job id: ${job.id}`);
@@ -537,6 +541,7 @@ export class VideoService {
       } catch (e) {
         const rcloneDir = this.configService.get<string>('RCLONE_DIR');
         const rcloneConfig = this.configService.get<string>('RCLONE_CONFIG_FILE');
+        console.error(e);
         this.logger.error(JSON.stringify(e));
         this.logger.info('Removing unprocessed file');
         try {
@@ -544,6 +549,7 @@ export class VideoService {
             this.logger.info('rclone ' + args.join(' '));
           }));
         } catch (e) {
+          console.error(e);
           this.logger.error(JSON.stringify(e));
         }
         throw e;
