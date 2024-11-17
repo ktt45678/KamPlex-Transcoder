@@ -132,6 +132,32 @@ export class RcloneHelper {
     });
   }
 
+  async deleteFile(configPath: string, rcloneDir: string, remote: string, path: string, logFn: (args: string[]) => void) {
+    const args: string[] = [
+      '--config', `"${configPath}"`,
+      'delete', `"${remote}:${path}"`
+    ];
+    logFn(args);
+    const pathExist = await this.isPathExist(configPath, rcloneDir, remote, path);
+    if (!pathExist) return;
+    //console.log('\x1b[36m%s\x1b[0m', 'rclone ' + args.join(' '));
+    return new Promise<void>((resolve, reject) => {
+      const rclone = child_process.spawn(`"${rcloneDir}/rclone"`, args, { shell: true });
+      let errorMessage = '';
+      rclone.stderr.setEncoding('utf8');
+      rclone.stderr.on('data', (data) => {
+        errorMessage += data + '\n';
+      });
+
+      rclone.on('exit', (code) => {
+        if (code === 0 || code === 9)
+          resolve();
+        else
+          reject({ code: code, message: errorMessage })
+      });
+    });
+  }
+
   async emptyPath(configPath: string, rcloneDir: string, remote: string, path: string, logFn: (args: string[]) => void,
     options: RcloneCommandOptions = {}) {
     const args: string[] = [

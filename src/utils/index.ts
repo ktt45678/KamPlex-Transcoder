@@ -8,4 +8,6 @@ export * from './snowflake-id.util';
 export * from './stream-manifest.util';
 export * from './string-crypto.util';
 export * from './string-helper.util';
+export * from './thumbhash.util';
 export * from './thumbnail.util';
+export * from './video-source-helper.util';

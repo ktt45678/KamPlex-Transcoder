@@ -11,6 +11,7 @@ import { AppController } from './app.controller';
 import { AppService } from './app.service';
 import { VideoModule } from './resources/video/video.module';
 import { VideoCancelModule } from './resources/video-cancel/video-cancel.module';
+import { TranscoderApiModule } from './common/modules/transcoder-api/transcoder-api.module';
 
 @Module({
   imports: [
@@ -59,7 +60,8 @@ import { VideoCancelModule } from './resources/video-cancel/video-cancel.module'
     }),
     ScheduleModule.forRoot(),
     VideoModule,
-    VideoCancelModule
+    VideoCancelModule,
+    TranscoderApiModule
   ],
   controllers: [AppController],
   providers: [AppService],

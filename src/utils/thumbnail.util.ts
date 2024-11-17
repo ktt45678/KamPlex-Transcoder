@@ -31,6 +31,8 @@ interface InputOptions {
   /** Path to FFmpeg Folder */
   ffmpegDir: string;
 
+  useURLInput: boolean;
+
   jobId: string | number;
 
   canceledJobIds: (string | number)[];
@@ -304,14 +306,24 @@ function generateThumbnails(inputFile: string, outputFolder: string, maxWidth: n
     const args = [
       '-hide_banner', '-y',
       '-progress', 'pipe:1',
-      '-loglevel', 'error',
+      '-loglevel', 'error'
+    ];
+
+    if (input.useURLInput) {
+      args.push(
+        '-reconnect', '1',
+        '-reconnect_on_http_error', '400,401,403,408,409,5xx',
+      );
+    }
+
+    args.push(
       '-i', `"${inputFile}"`,
       '-vf', `"${videoFilters.join(',')}"`,
       '-qmin', '1',
       '-qscale:v', '1',
       '-f', 'image2',
       `"${outputFolder}/thumb_%d.png"`
-    ];
+    );
 
     let generatedFrames = 0;
 
@@ -322,7 +334,7 @@ function generateThumbnails(inputFile: string, outputFolder: string, maxWidth: n
       const progress = ffmpegHelper.parseProgress(data);
       generatedFrames = progress.frame || 0;
       const percent = ffmpegHelper.progressPercent(progress.outTimeMs, input.duration * 1000000);
-      stdout.write(`Encoding: ${percent}% - frame: ${progress.frame || 'N/A'} - fps: ${progress.fps || 'N/A'} - bitrate: ${progress.bitrate} - time: ${progress.outTime}\r`);
+      stdout.write(`${ffmpegHelper.getProgressMessage(progress, percent)}\r`);
     });
 
     ffmpeg.stderr.setEncoding('utf8');
@@ -338,7 +350,7 @@ function generateThumbnails(inputFile: string, outputFolder: string, maxWidth: n
       isCancelled = true;
       ffmpeg.stdin.write('q');
       ffmpeg.stdin.end();
-    }, 5000)
+    }, 5000);
 
     ffmpeg.on('exit', (code: number) => {
       stdout.write('\n');

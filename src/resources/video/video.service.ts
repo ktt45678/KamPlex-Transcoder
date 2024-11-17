@@ -15,14 +15,15 @@ import { externalStorageModel } from '../../models/external-storage.model';
 import { mediaStorageModel } from '../../models/media-storage.model';
 import { settingModel } from '../../models/setting.model';
 import { mediaModel } from '../../models/media.model';
-import { IVideoData, IJobData, IStorage, IEncodingSetting, MediaQueueResult, EncodeAudioOptions, EncodeVideoOptions, VideoSourceInfo, CreateAudioEncodingArgsOptions, CreateVideoEncodingArgsOptions, EncodeAudioByTrackOptions, AdvancedVideoSettings, ResolveVideoFiltersOptions } from './interfaces';
+import { IVideoData, IJobData, IStorage, IEncodingSetting, MediaQueueResult, EncodeAudioOptions, EncodeVideoOptions, VideoSourceInfo, CreateAudioEncodingArgsOptions, CreateVideoEncodingArgsOptions, EncodeAudioByTrackOptions, AdvancedVideoSettings, ResolveVideoFiltersOptions, ValidateSourceQualityOptions } from './interfaces';
 import { AudioCodec, StatusCode, VideoCodec, RejectCode, TaskQueue } from '../../enums';
-import { ENCODING_QUALITY, AUDIO_PARAMS, AUDIO_SURROUND_PARAMS, VIDEO_H264_PARAMS, VIDEO_VP9_PARAMS, VIDEO_AV1_PARAMS, AUDIO_SPEED_PARAMS, AUDIO_SURROUND_OPUS_PARAMS } from '../../config';
+import { ENCODING_QUALITY, AUDIO_PARAMS, AUDIO_SURROUND_PARAMS, VIDEO_H264_PARAMS, VIDEO_H265_PARAMS, VIDEO_VP9_PARAMS, VIDEO_AV1_PARAMS, AUDIO_SPEED_PARAMS, AUDIO_SURROUND_OPUS_PARAMS, NEXT_GEN_ENCODING_QUALITY, SPLIT_SEGMENT_FOLDER, CONCAT_SEGMENT_FILE } from '../../config';
 import { HlsManifest, RcloneFile } from '../../common/interfaces';
 import { KamplexApiService } from '../../common/modules/kamplex-api';
+import { TranscoderApiService } from '../../common/modules/transcoder-api';
 import {
   createSnowFlakeId, diskSpaceUtil, ffmpegHelper, fileHelper, generateSprites, mediaInfoHelper, MediaInfoResult,
-  StringCrypto, stringHelper, StreamManifest, rcloneHelper
+  StringCrypto, stringHelper, StreamManifest, rcloneHelper, videoSourceHelper
 } from '../../utils';
 
 type JobNameType = 'update-source' | 'add-stream-video' | 'add-stream-audio' | 'add-stream-manifest' | 'finished-encoding' |
@@ -35,14 +36,19 @@ export class VideoService {
   private AudioSurroundParams: string[];
   private AudioSurroundOpusParams: string[];
   private VideoH264Params: string[];
+  private VideoH265Params: string[];
   private VideoVP9Params: string[];
   private VideoAV1Params: string[];
+  private UseURLInput: boolean;
+  private SplitEncoding: boolean;
   private CanceledJobIds: (string | number)[];
+  private TranscoderPriority: number;
   private thumbnailFolder: string;
 
   constructor(@Inject(WINSTON_MODULE_PROVIDER) private readonly logger: Logger,
     @InjectQueue(TaskQueue.VIDEO_TRANSCODE_RESULT) private videoResultQueue: Queue<MediaQueueResult, any, JobNameType>,
-    private configService: ConfigService, private kamplexApiService: KamplexApiService) {
+    private configService: ConfigService, private kamplexApiService: KamplexApiService,
+    private transcoderApiService: TranscoderApiService) {
     const audioParams = this.configService.get<string>('AUDIO_PARAMS');
     this.AudioParams = audioParams ? audioParams.split(' ') : AUDIO_PARAMS;
     const audioSpeedParams = this.configService.get<string>('AUDIO_SPEED_PARAMS');
@@ -53,11 +59,16 @@ export class VideoService {
     this.AudioSurroundOpusParams = audioSurroundOpusParams ? audioSurroundOpusParams.split(' ') : AUDIO_SURROUND_OPUS_PARAMS;
     const videoH264Params = this.configService.get<string>('VIDEO_H264_PARAMS');
     this.VideoH264Params = videoH264Params ? videoH264Params.split(' ') : VIDEO_H264_PARAMS;
+    const videoH265Params = this.configService.get<string>('VIDEO_H265_PARAMS');
+    this.VideoH265Params = videoH265Params ? videoH265Params.split(' ') : VIDEO_H265_PARAMS;
     const videoVP9Params = this.configService.get<string>('VIDEO_VP9_PARAMS');
     this.VideoVP9Params = videoVP9Params ? videoVP9Params.split(' ') : VIDEO_VP9_PARAMS;
     const videoAV1Params = this.configService.get<string>('VIDEO_AV1_PARAMS');
     this.VideoAV1Params = videoAV1Params ? videoAV1Params.split(' ') : VIDEO_AV1_PARAMS;
+    this.UseURLInput = this.configService.get<string>('USE_URL_INPUT') === 'true';
+    this.SplitEncoding = this.configService.get<string>('SPLIT_ENCODING') === 'true';
     this.CanceledJobIds = [];
+    this.TranscoderPriority = 0;
     this.thumbnailFolder = 'thumbnails';
   }
 
@@ -73,15 +84,19 @@ export class VideoService {
     await mongoose.connect(this.configService.get<string>('DATABASE_URL'), { family: 4, useBigInt64: true });
     const appSettings = await settingModel.findOne({}).lean().exec();
     const mediaInfo = await mediaModel.findOne({ _id: BigInt(job.data.media) }, { _id: 1, originalLang: 1 }).lean().exec();
+    const streamStorage = await externalStorageModel.findOne({ _id: BigInt(job.data.storage) }, { _id: 1, publicUrl: 1 }).lean().exec();
 
     const audioParams = appSettings.audioParams ? appSettings.audioParams.split(' ') : this.AudioParams;
     const audioSpeedParams = appSettings.audioSpeedParams ? appSettings.audioSpeedParams.split(' ') : this.AudioSpeedParams;
     const audioSurroundParams = appSettings.audioSurroundParams ? appSettings.audioSurroundParams.split(' ') : this.AudioSurroundParams;
     const audioSurroundOpusParams = appSettings.audioSurroundOpusParams ? appSettings.audioSurroundOpusParams.split(' ') : this.AudioSurroundOpusParams;
     const videoH264Params = appSettings.videoH264Params ? appSettings.videoH264Params.split(' ') : this.VideoH264Params;
+    const videoH265Params = appSettings.videoH265Params ? appSettings.videoH265Params.split(' ') : this.VideoH265Params;
     const videoVP9Params = appSettings.videoVP9Params ? appSettings.videoVP9Params.split(' ') : this.VideoVP9Params;
     const videoAV1Params = appSettings.videoAV1Params ? appSettings.videoAV1Params.split(' ') : this.VideoAV1Params;
-    const qualityList = Array.isArray(appSettings.videoQualityList) && appSettings.videoQualityList.length ? appSettings.videoQualityList : ENCODING_QUALITY;
+    const qualityList = VideoCodec.H264 === codec ?
+      (Array.isArray(appSettings.videoQualityList) && appSettings.videoQualityList.length ? appSettings.videoQualityList : ENCODING_QUALITY) :
+      (Array.isArray(appSettings.videoNextGenQualityList) && appSettings.videoNextGenQualityList.length ? appSettings.videoNextGenQualityList : NEXT_GEN_ENCODING_QUALITY);
     const encodingSettings = appSettings.videoEncodingSettings || [];
 
     const rcloneDir = this.configService.get<string>('RCLONE_DIR');
@@ -97,6 +112,8 @@ export class VideoService {
     if (job.data.linkedStorage)
       await this.ensureRcloneConfigExist(rcloneConfigFile, job.data.linkedStorage, job);
 
+    let linkedInputUrl = this.UseURLInput ? await this.getLinkedSourceUrl(job) : null;
+
     // Retry if the transcoder was interrupted before
     const retryFromInterruption = await fileHelper.fileExists(transcodeDir);
     if (retryFromInterruption) {
@@ -107,13 +124,16 @@ export class VideoService {
     }
 
     let availableQualityList: number[] | null = null;
+    const forcedQualityList = job.data.advancedOptions?.forceVideoQuality || [];
     // Find and validate source quality if the quality is available on db
     {
       const sourceInfo = await mediaStorageModel.findOne({ _id: BigInt(job.data._id) }, { _id: 1, name: 1, quality: 1 }).lean().exec();
       if (sourceInfo?.quality) {
         try {
-          availableQualityList = await this.validateSourceQuality(parsedInput, sourceInfo.quality, qualityList, codec,
-            retryFromInterruption, job);
+          availableQualityList = await this.validateSourceQuality({
+            parsedInput, quality: sourceInfo.quality, qualityList, forcedQualityList, fallbackQualityList: [Math.min(...qualityList)],
+            codec, retryFromInterruption, job
+          });
           if (availableQualityList === null)
             return {}; // There's nothing to encode
         } finally {
@@ -126,38 +146,49 @@ export class VideoService {
     // Disconnect MongoDB
     await mongoose.disconnect();
 
-    this.logger.info(`Downloading file from media id: ${job.data._id}`);
-    try {
-      const downloadedFileStats = await fileHelper.statFile(inputFile);
-      if (!downloadedFileStats || downloadedFileStats.size !== job.data.size) {
-        if (downloadedFileStats)
-          await fileHelper.deleteFile(inputFile); // Delete file if exist
-        const downloadStorage = job.data.linkedStorage || job.data.storage;
-        await rcloneHelper.downloadFile(rcloneConfigFile, rcloneDir, downloadStorage, job.data.path, job.data.filename, transcodeDir,
-          !!job.data.linkedStorage, (args => {
-            this.logger.info('rclone ' + args.join(' '));
-          }));
-        if (job.data.linkedStorage) {
-          // Trim file name and create folder on remote
-          await Promise.all([
-            fileHelper.renameFile(`${transcodeDir}/${job.data.filename}`, inputFile),
-            rcloneHelper.mkdirRemote(rcloneConfigFile, rcloneDir, job.data.storage, job.data._id)
-          ]);
+    await fileHelper.createDir(transcodeDir);
+    // Still need to download for audio encoding
+    if (!this.UseURLInput || codec === VideoCodec.H264) {
+      this.logger.info(`Downloading file from media id: ${job.data._id}`);
+      try {
+        const downloadedFileStats = await fileHelper.statFile(inputFile);
+        if (!downloadedFileStats || downloadedFileStats.size !== job.data.size) {
+          if (downloadedFileStats)
+            await fileHelper.deleteFile(inputFile); // Delete file if exist
+          const downloadStorage = job.data.linkedStorage || job.data.storage;
+          await rcloneHelper.downloadFile(rcloneConfigFile, rcloneDir, downloadStorage, job.data.path, job.data.filename, transcodeDir,
+            !!job.data.linkedStorage, (args => {
+              this.logger.info('rclone ' + args.join(' '));
+            }));
+          if (job.data.linkedStorage) {
+            // Trim file name and create folder on remote
+            await Promise.all([
+              fileHelper.renameFile(`${transcodeDir}/${job.data.filename}`, inputFile),
+              rcloneHelper.mkdirRemote(rcloneConfigFile, rcloneDir, job.data.storage, job.data._id)
+            ]);
+          }
         }
+      } catch (e) {
+        console.error(e);
+        this.logger.error(e);
+        await fileHelper.deleteFolder(transcodeDir);
+        const statusError = await this.generateStatusError(StatusCode.DOWNLOAD_FAILED, job);
+        throw new Error(statusError.errorCode);
       }
-    } catch (e) {
-      console.error(e);
-      this.logger.error(e);
-      await fileHelper.deleteFolder(transcodeDir);
-      const statusError = await this.generateStatusError(StatusCode.DOWNLOAD_FAILED, job);
-      throw new Error(statusError.errorCode);
     }
+
     let videoInfo: FFprobe.FFProbeResult;
     let videoMIInfo: MediaInfoResult;
-    this.logger.info(`Processing input file: ${inputFile}`);
     try {
-      videoInfo = await FFprobe(inputFile, { path: `${ffmpegDir}/ffprobe` });
-      videoMIInfo = await mediaInfoHelper.getMediaInfo(inputFile, mediainfoDir);
+      if (!this.UseURLInput) {
+        this.logger.info(`Processing input file: ${inputFile}`);
+        videoInfo = await FFprobe(inputFile, { path: `${ffmpegDir}/ffprobe` });
+        videoMIInfo = await mediaInfoHelper.getMediaInfo(inputFile, mediainfoDir);
+      } else {
+        this.logger.info(`Processing input file: ${linkedInputUrl}`);
+        videoInfo = await FFprobe(linkedInputUrl, { path: `${ffmpegDir}/ffprobe` });
+        videoMIInfo = await mediaInfoHelper.getMediaInfo(linkedInputUrl, mediainfoDir);
+      }
     } catch (e) {
       console.error(e);
       this.logger.error(e);
@@ -195,8 +226,10 @@ export class VideoService {
     // Validate source file by reading the local file
     if (!availableQualityList) {
       try {
-        availableQualityList = await this.validateSourceQuality(parsedInput, videoTrack.height, qualityList, codec,
-          retryFromInterruption, job);
+        availableQualityList = await this.validateSourceQuality({
+          parsedInput, quality: videoTrack.height, qualityList, forcedQualityList, fallbackQualityList: [Math.min(...qualityList)],
+          codec, retryFromInterruption, job
+        });
         if (availableQualityList === null)
           return {}; // There's nothing to encode
       } finally {
@@ -251,16 +284,17 @@ export class VideoService {
         if (secondAudioTrack != null) {
           this.logger.info(`Audio track index ${secondAudioTrack.index} (surround)`);
           await this.encodeAudioByTrack({
-            inputFile, parsedInput, type: 'surround', audioTrack: secondAudioTrack, audioAACParams: audioSurroundParams,
-            audioOpusParams: audioSurroundOpusParams, isDefault: true, downmix: false, language: audioOriginalLang, manifest, job
+            inputFile, parsedInput, type: 'surround', audioTrack: secondAudioTrack,
+            audioAACParams: audioSurroundParams, audioOpusParams: audioSurroundOpusParams, isDefault: true, downmix: false,
+            language: audioOriginalLang, manifest, job
           });
         }
         // Encode stereo or mono audio track
         this.logger.info(`Audio track index ${firstAudioTrack.index} (normal)`);
         await this.encodeAudioByTrack({
-          inputFile, parsedInput, type: 'normal', audioTrack: firstAudioTrack, audioAACParams: audioParams,
-          audioOpusParams: audioSpeedParams, isDefault: !secondAudioTrack, downmix: firstAudioTrack.channels > 2,
-          language: audioOriginalLang, manifest, job
+          inputFile, parsedInput, type: 'normal', audioTrack: firstAudioTrack,
+          audioAACParams: audioParams, audioOpusParams: audioSpeedParams, isDefault: !secondAudioTrack,
+          downmix: firstAudioTrack.channels > 2, language: audioOriginalLang, manifest, job
         });
         // Encode any others audio tracks
         for (let i = 0; i < audioExtraTracks.length; i++) {
@@ -271,10 +305,13 @@ export class VideoService {
           const extraOpusParams = extraAudioTrack.channels > 2 ? audioSurroundOpusParams : audioSpeedParams;
           this.logger.info(`Audio track index ${extraAudioTrack.index} (others, channels: ${extraAudioTrack.channels}, language: ${extraTrackLang})`);
           await this.encodeAudioByTrack({
-            inputFile, parsedInput, type: extraTrackType, audioTrack: extraAudioTrack, audioAACParams: extraAACParams,
-            audioOpusParams: extraOpusParams, isDefault: false, downmix: false, manifest, job
+            inputFile, parsedInput, type: extraTrackType, audioTrack: extraAudioTrack,
+            audioAACParams: extraAACParams, audioOpusParams: extraOpusParams, isDefault: false, downmix: false, manifest, job
           });
         }
+        // Delete the downloaded source file after the audio is processed, continue using URL
+        if (this.UseURLInput)
+          await fileHelper.deleteFile(inputFile);
       } catch (e) {
         console.error(e);
         this.logger.error(JSON.stringify(e));
@@ -289,6 +326,31 @@ export class VideoService {
     }
 
     try {
+      let remuxFileName: string | null = null;
+      // Only remux when enable SplitEncoding, UseURLInput, source is not mp4 or mkv
+      if (this.SplitEncoding && this.UseURLInput && !['.mp4', '.mkv'].includes(parsedInput.ext)) {
+        await this.transcoderApiService.checkAndWaitForTranscoderPriority();
+        this.logger.info(`Remuxing file: ${inputFile}`);
+        remuxFileName = `${parsedInput.name}_remux_${codec}.mkv`;
+        const remuxFilePath = `${parsedInput.dir}/${remuxFileName}`;
+        const remuxUrlFolder = `${job.data.storage}:${job.data._id}`;
+        const remuxUrlPath = `/${job.data._id}/${remuxFileName}`;
+        await videoSourceHelper.remuxSourceMKV(linkedInputUrl, remuxFilePath, {
+          ffmpegDir: ffmpegDir,
+          duration: videoDuration,
+          videoOnly: true,
+          //audioCodec: (videoInfo.format.format_name === 'mpegts' ||
+          // audioTracks[0].codec_name === 'pcm_bluray') ? 'pcm_s24le' : 'copy',
+          useURLInput: this.UseURLInput,
+          jobId: job.id,
+          canceledJobIds: this.CanceledJobIds,
+          logFn: (message) => { this.logger.info(message) }
+        });
+        const moveRemuxFileArgs = this.createRcloneMoveArgs(remuxFilePath, remuxUrlFolder);
+        await this.uploadMedia(moveRemuxFileArgs, job.id);
+        linkedInputUrl = streamStorage.publicUrl.replace(':path', remuxUrlPath);
+      }
+      // Video info
       const isHDRVideo = mediaInfoHelper.isHDRVideo(videoTrack.color_space, videoTrack.color_transfer, videoTrack.color_primaries);
       const sourceInfo: VideoSourceInfo = {
         duration: videoDuration, fps: videoFps, bitrate: videoBitrate, codec: videoCodec, sourceH264Params: videoSourceH264Params,
@@ -297,41 +359,51 @@ export class VideoService {
       if (codec === VideoCodec.H264) {
         this.logger.info('Video codec: H264');
         await this.encodeByCodec({
-          inputFile, parsedInput, sourceInfo, qualityList: availableQualityList, encodingSettings,
+          inputFile, parsedInput, inputFileUrl: linkedInputUrl, sourceInfo, qualityList: availableQualityList, encodingSettings,
           advancedSettings: job.data.advancedOptions, codec: VideoCodec.H264, videoParams: videoH264Params, manifest, job
         });
-      }
-      else if (codec === VideoCodec.VP9) {
+      } else if (codec === VideoCodec.H265) {
+        this.logger.info('Video codec: H265');
+        await this.encodeByCodec({
+          inputFile, parsedInput, inputFileUrl: linkedInputUrl, sourceInfo, qualityList: availableQualityList, encodingSettings,
+          advancedSettings: job.data.advancedOptions, codec: VideoCodec.H265, videoParams: videoH265Params, manifest, job
+        });
+      } else if (codec === VideoCodec.VP9) {
         this.logger.info('Video codec: VP9');
         await this.encodeByCodec({
-          inputFile, parsedInput, sourceInfo, qualityList: availableQualityList, encodingSettings,
+          inputFile, parsedInput, inputFileUrl: linkedInputUrl, sourceInfo, qualityList: availableQualityList, encodingSettings,
           advancedSettings: job.data.advancedOptions, codec: VideoCodec.VP9, videoParams: videoVP9Params, manifest, job
         });
-      }
-      else if (codec === VideoCodec.AV1) {
+      } else if (codec === VideoCodec.AV1) {
         this.logger.info('Video codec: AV1');
         await this.encodeByCodec({
-          inputFile, parsedInput, sourceInfo, qualityList: availableQualityList, encodingSettings,
+          inputFile, parsedInput, inputFileUrl: linkedInputUrl, sourceInfo, qualityList: availableQualityList, encodingSettings,
           advancedSettings: job.data.advancedOptions, codec: VideoCodec.AV1, videoParams: videoAV1Params, manifest, job
         });
       }
-      // Generate preview thumbnail
-      this.logger.info(`Generating preview thumbnail: ${inputFile}`);
-      await generateSprites({
-        source: inputFile,
-        output: `${parsedInput.dir}/${this.thumbnailFolder}`,
-        duration: videoDuration,
-        isHDR: isHDRVideo,
-        ffmpegDir,
-        jobId: job.id,
-        canceledJobIds: this.CanceledJobIds
-      }, [
-        { tw: 160, th: 160, pageCols: 10, pageRows: 10, prefix: 'M', format: 'jpeg' },
-        { tw: 320, th: 320, pageCols: 5, pageRows: 5, prefix: 'L', format: 'jpeg' }
-      ]);
-      const syncThumbnails = !!job.data.update;
-      const rcloneMoveThumbArgs = this.createRcloneMoveThumbArgs(transcodeDir, job.data.storage, job.data._id, syncThumbnails);
-      await this.uploadMedia(rcloneMoveThumbArgs, job.id);
+
+      if (codec === VideoCodec.H264) {
+        // Generate preview thumbnail
+        this.logger.info(`Generating preview thumbnail: ${inputFile}`);
+        this.setTranscoderPriority(1);
+        await generateSprites({
+          source: linkedInputUrl || inputFile,
+          output: `${parsedInput.dir}/${this.thumbnailFolder}`,
+          duration: videoDuration,
+          isHDR: isHDRVideo,
+          ffmpegDir,
+          useURLInput: this.UseURLInput,
+          jobId: job.id,
+          canceledJobIds: this.CanceledJobIds
+        }, [
+          { tw: 160, th: 160, pageCols: 10, pageRows: 10, prefix: 'M', format: 'jpeg' },
+          { tw: 320, th: 320, pageCols: 5, pageRows: 5, prefix: 'L', format: 'jpeg' }
+        ]);
+        this.setTranscoderPriority(0);
+        const syncThumbnails = !!job.data.update;
+        const rcloneMoveThumbArgs = this.createRcloneMoveThumbArgs(transcodeDir, job.data.storage, job.data._id, syncThumbnails);
+        await this.uploadMedia(rcloneMoveThumbArgs, job.id);
+      }
 
       if (job.data.replaceStreams?.length) {
         this.logger.info('Removing old streams');
@@ -342,7 +414,13 @@ export class VideoService {
             }))
         }
       }
-
+      // Remove remux file if exist
+      if (remuxFileName) {
+        this.logger.info(`Removing remux file: ${remuxFileName}`);
+        await rcloneHelper.deleteFile(rcloneConfigFile, rcloneDir, job.data.storage, `${job.data._id}/${remuxFileName}`, (args => {
+          this.logger.info('rclone ' + args.join(' '));
+        }));
+      }
       // Check uploaded files
       this.logger.info('Checking uploaded files');
       const checkFilesExclusion = `${this.thumbnailFolder}/**`;
@@ -370,6 +448,7 @@ export class VideoService {
     } finally {
       this.logger.info('Cleaning up');
       await fileHelper.deleteFolder(transcodeDir);
+      this.setTranscoderPriority(0);
       this.logger.info('Completed');
     }
     await this.kamplexApiService.ensureProducerAppIsOnline(job.data.producerUrl);
@@ -385,8 +464,16 @@ export class VideoService {
     return job.data;
   }
 
+  getTranscoderPriority() {
+    return this.TranscoderPriority;
+  }
+
+  private setTranscoderPriority(priority: number) {
+    this.TranscoderPriority = priority;
+  }
+
   private async encodeAudioByTrack(options: EncodeAudioByTrackOptions) {
-    const { inputFile, parsedInput, type, audioTrack, audioAACParams, audioOpusParams, isDefault, downmix, language, manifest, job } = options;
+    const { inputFile, parsedInput, inputFileUrl, type, audioTrack, audioAACParams, audioOpusParams, isDefault, downmix, language, manifest, job } = options;
     const aacType = type === 'normal' ? AudioCodec.AAC : AudioCodec.AAC_SURROUND;
     const opusType = type === 'normal' ? AudioCodec.OPUS : AudioCodec.OPUS_SURROUND;
     this.logger.info('Audio codec: AAC');
@@ -394,7 +481,7 @@ export class VideoService {
     const audioChannels = audioTrack.channels || (type === 'normal' ? 2 : 0);
     const audioTitle = audioTrack.tags?.title || null;
     await this.encodeAudio({
-      inputFile, parsedInput, sourceInfo: { duration: audioDuration, channels: audioChannels, language, title: audioTitle },
+      inputFile, parsedInput, inputFileUrl, sourceInfo: { duration: audioDuration, channels: audioChannels, language, title: audioTitle },
       audioTrackIndex: audioTrack.index, codec: aacType, isDefault, downmix, audioParams: audioAACParams,
       manifest, job
     });
@@ -402,7 +489,7 @@ export class VideoService {
     if (type === 'normal' || [5, 6, 7, 8].includes(audioChannels)) {
       this.logger.info('Audio codec: OPUS');
       await this.encodeAudio({
-        inputFile, parsedInput, sourceInfo: { duration: audioDuration, channels: audioChannels, language, title: audioTitle },
+        inputFile, parsedInput, inputFileUrl, sourceInfo: { duration: audioDuration, channels: audioChannels, language, title: audioTitle },
         audioTrackIndex: audioTrack.index, codec: opusType, isDefault: false, downmix, audioParams: audioOpusParams,
         manifest, job
       });
@@ -410,10 +497,10 @@ export class VideoService {
   }
 
   private async encodeAudio(options: EncodeAudioOptions) {
-    const { inputFile, parsedInput, sourceInfo, audioTrackIndex, codec, isDefault, downmix, audioParams, manifest, job } = options;
+    const { inputFile, parsedInput, inputFileUrl, sourceInfo, audioTrackIndex, codec, isDefault, downmix, audioParams, manifest, job } = options;
     const streamId = await createSnowFlakeId();
     const audioArgs = this.createAudioEncodingArgs({
-      inputFile, parsedInput, audioParams, codec, channels: sourceInfo.channels,
+      inputFile: inputFileUrl || inputFile, parsedInput, audioParams, codec, channels: sourceInfo.channels,
       downmix, audioIndex: audioTrackIndex
     });
     const audioBaseName = `${parsedInput.name}_audio_${audioTrackIndex}`;
@@ -421,9 +508,11 @@ export class VideoService {
     const manifestFileName = `${audioBaseName}.m3u8`;
     const mpdManifestFileName = `${audioBaseName}.mpd`;
     const playlistFileName = `${audioBaseName}_1.m3u8`;
-    await this.encodeMedia(audioArgs, sourceInfo.duration, job.id);
 
+    this.setTranscoderPriority(1);
+    await this.encodeMedia(audioArgs, sourceInfo.duration, job.id);
     await this.prepareMediaFile(audioFileName, parsedInput, `${audioBaseName}_temp`, manifestFileName, job);
+    this.setTranscoderPriority(0);
 
     this.logger.info(`Reading audio data: ${audioFileName}, ${mpdManifestFileName}, ${playlistFileName} and ${manifestFileName}`);
     const audioInfo = await FFprobe(`${parsedInput.dir}/${audioFileName}`, { path: `${this.configService.get<string>('FFMPEG_DIR')}/ffprobe` });
@@ -467,7 +556,7 @@ export class VideoService {
 
   private async encodeByCodec(options: EncodeVideoOptions) {
     const {
-      inputFile, parsedInput, sourceInfo, qualityList, encodingSettings, advancedSettings = {}, codec, videoParams,
+      inputFile, parsedInput, inputFileUrl, sourceInfo, qualityList, encodingSettings, advancedSettings = {}, codec, videoParams,
       manifest, job
     } = options;
     // Merge default encoding settings with override settings
@@ -488,29 +577,38 @@ export class VideoService {
       const mpdManifestFileName = `${videoBaseName}.mpd`;
       const playlistFileName = `${videoBaseName}_1.m3u8`;
       try {
-        if (codec === VideoCodec.H264) {
-          const videoArgs = this.createVideoEncodingArgs({
-            inputFile, parsedInput, codec, quality: qualityList[i], videoParams,
-            sourceInfo, crfKey: 'crf', advancedSettings, encodingSetting: perQualitySettings
-          });
-          await this.encodeMedia(videoArgs, sourceInfo.duration, job.id);
-        } else {
-          // Pass 1 params
-          const videoPass1Args = this.createTwoPassesVideoEncodingArgs({
-            inputFile, parsedInput, codec, quality: qualityList[i], videoParams,
-            sourceInfo, crfKey: 'cq', advancedSettings, encodingSetting: perQualitySettings, pass: 1
-          });
-          // Pass 2 params
-          const videoPass2Args = this.createTwoPassesVideoEncodingArgs({
-            inputFile, parsedInput, codec, quality: qualityList[i], videoParams,
-            sourceInfo, crfKey: 'cq', advancedSettings, encodingSetting: perQualitySettings, pass: 2
-          });
+        if (!this.SplitEncoding) {
+          this.setTranscoderPriority(1);
+          if (codec === VideoCodec.H264 || codec === VideoCodec.H265 || codec === VideoCodec.AV1) {
+            const crfKey = codec === VideoCodec.AV1 ? 'cq' : 'crf';
+            const videoArgs = this.createVideoEncodingArgs({
+              inputFile: inputFileUrl || inputFile, parsedInput, codec, quality: qualityList[i], videoParams,
+              sourceInfo, crfKey, advancedSettings, encodingSetting: perQualitySettings
+            });
+            await this.encodeMedia(videoArgs, sourceInfo.duration, job.id);
+          } else {
+            // Pass 1 params
+            const videoPass1Args = this.createTwoPassesVideoEncodingArgs({
+              inputFile: inputFileUrl || inputFile, parsedInput, codec, quality: qualityList[i], videoParams,
+              sourceInfo, crfKey: 'cq', advancedSettings, encodingSetting: perQualitySettings, pass: 1
+            });
+            // Pass 2 params
+            const videoPass2Args = this.createTwoPassesVideoEncodingArgs({
+              inputFile: inputFileUrl || inputFile, parsedInput, codec, quality: qualityList[i], videoParams,
+              sourceInfo, crfKey: 'cq', advancedSettings, encodingSetting: perQualitySettings, pass: 2
+            });
 
-          await this.encodeMedia(videoPass1Args, sourceInfo.duration, job.id);
-          await this.encodeMedia(videoPass2Args, sourceInfo.duration, job.id);
+            await this.encodeMedia(videoPass1Args, sourceInfo.duration, job.id);
+            await this.encodeMedia(videoPass2Args, sourceInfo.duration, job.id);
+          }
+          this.setTranscoderPriority(0);
+        } else {
+          await this.splitAndEncodeVideo(options, qualityList[i], perQualitySettings);
         }
 
+        this.setTranscoderPriority(1);
         await this.prepareMediaFile(videoFileName, parsedInput, `${videoBaseName}_temp`, manifestFileName, job);
+        this.setTranscoderPriority(0);
 
         this.logger.info(`Reading video data: ${videoFileName}, ${mpdManifestFileName}, ${playlistFileName} and ${manifestFileName}`);
         const videoMIInfo = await mediaInfoHelper.getMediaInfo(`${parsedInput.dir}/${videoFileName}`,
@@ -568,6 +666,59 @@ export class VideoService {
         }
       });
     }
+  }
+
+  private async splitAndEncodeVideo(options: EncodeVideoOptions, quality: number, perQualitySettings: IEncodingSetting, segmentDuration: number = 15) {
+    const { inputFile, parsedInput, inputFileUrl, sourceInfo, advancedSettings = {}, codec, videoParams, job } = options;
+    const totalSegments = Math.ceil(sourceInfo.duration / segmentDuration);
+    const segmentFolder = `${parsedInput.dir}/${SPLIT_SEGMENT_FOLDER}`;
+    const concatSegmentFile = `${segmentFolder}/${CONCAT_SEGMENT_FILE}`;
+    this.logger.info(`Total segments: ${totalSegments}`);
+
+    //Create segment folder
+    await fileHelper.createDir(segmentFolder);
+    this.setTranscoderPriority(1);
+
+    for (let i = 0; i < totalSegments; i++) {
+      await this.transcoderApiService.checkAndWaitForTranscoderPriority();
+      const startTime = i * segmentDuration;
+      this.logger.info(`Segments ${i + 1}/${totalSegments}`);
+      if (codec === VideoCodec.H264 || codec === VideoCodec.H265 || codec === VideoCodec.AV1) {
+        const crfKey = codec === VideoCodec.AV1 ? 'cq' : 'crf';
+        const videoArgs = this.createVideoEncodingArgs({
+          inputFile: inputFileUrl || inputFile, parsedInput, codec, quality, videoParams,
+          sourceInfo, crfKey, advancedSettings, encodingSetting: perQualitySettings, splitFrom: startTime.toString(),
+          splitDuration: segmentDuration.toString(), segmentIndex: i
+        });
+        await this.encodeMedia(videoArgs, segmentDuration, job.id);
+      } else {
+        // Pass 1 params
+        const videoPass1Args = this.createTwoPassesVideoEncodingArgs({
+          inputFile: inputFileUrl || inputFile, parsedInput, codec, quality, videoParams,
+          sourceInfo, crfKey: 'cq', advancedSettings, encodingSetting: perQualitySettings, pass: 1, splitFrom: startTime.toString(),
+          splitDuration: segmentDuration.toString(), segmentIndex: i
+        });
+        // Pass 2 params
+        const videoPass2Args = this.createTwoPassesVideoEncodingArgs({
+          inputFile: inputFileUrl || inputFile, parsedInput, codec, quality, videoParams,
+          sourceInfo, crfKey: 'cq', advancedSettings, encodingSetting: perQualitySettings, pass: 2, splitFrom: startTime.toString(),
+          splitDuration: segmentDuration.toString(), segmentIndex: i
+        });
+
+        await this.encodeMedia(videoPass1Args, segmentDuration, job.id);
+        await this.encodeMedia(videoPass2Args, segmentDuration, job.id);
+      }
+
+      await fileHelper.appendToFile(concatSegmentFile, `file '${quality}_${i}.mp4'\n`);
+    }
+
+    // Merge back
+    const concatSegmentArgs = this.createConcatSegmentArgs(concatSegmentFile, parsedInput, `${parsedInput.name}_${quality}`);
+    await this.encodeMedia(concatSegmentArgs, sourceInfo.duration, job.id);
+    this.setTranscoderPriority(0);
+
+    // Remove segment folder
+    await fileHelper.deleteFolder(segmentFolder);
   }
 
   @Cron('0 0 */5 * *')
@@ -648,6 +799,12 @@ export class VideoService {
       '-i', `"${inputFile}"`,
       '-vn'
     ];
+    if (this.UseURLInput) {
+      args.push(
+        '-reconnect', '1',
+        '-reconnect_on_http_error', '400,401,403,408,409,5xx',
+      );
+    }
     if (bitrate > 0) {
       args.push('-b:a', `${bitrate}K`);
     }
@@ -681,23 +838,37 @@ export class VideoService {
   }
 
   private createVideoEncodingArgs(options: CreateVideoEncodingArgsOptions) {
-    const { inputFile, parsedInput, codec, quality, videoParams, sourceInfo, crfKey, advancedSettings, encodingSetting } = options;
+    const { inputFile, parsedInput, codec, quality, videoParams, sourceInfo, crfKey, advancedSettings, encodingSetting,
+      splitFrom, splitDuration, segmentIndex } = options;
     const gopSize = (sourceInfo.fps ? sourceInfo.fps * 2 : 48).toString();
     const videoFilters = this.resolveVideoFilters({ quality, hdrTonemap: sourceInfo.isHDR });
     const args: string[] = [
       '-hide_banner', '-y',
+      '-hwaccel', 'auto',
       '-progress', 'pipe:1',
-      '-loglevel', 'error',
-      '-i', `"${inputFile}"`,
+      '-loglevel', 'error'
+    ];
+    if (this.UseURLInput) {
+      args.push(
+        '-reconnect', '1',
+        '-reconnect_on_http_error', '400,401,403,408,409,5xx',
+      );
+    }
+    splitFrom && args.push('-ss', splitFrom);
+    args.push('-i', `"${inputFile}"`);;
+    splitDuration && args.push('-t', splitDuration);
+    args.push(
       ...videoParams,
       '-g', gopSize,
       '-keyint_min', gopSize,
       '-sc_threshold', '0'
-    ];
+    );
     if (encodingSetting)
       this.resolveEncodingSettings(args, encodingSetting, sourceInfo, crfKey);
     if (codec === VideoCodec.H264)
       this.resolveH264Params(args, advancedSettings, quality, sourceInfo);
+    else if (codec === VideoCodec.AV1)
+      this.resolveSVTAV1Params(args, advancedSettings, sourceInfo);
     args.push(
       '-map', '0:v:0',
       //'-map_metadata', '-1',
@@ -705,36 +876,59 @@ export class VideoService {
       '-vf', videoFilters,
       //'-movflags', '+faststart',
       '-f', 'mp4',
-      `"${parsedInput.dir}/${parsedInput.name}_${quality}.mp4"`
     );
+    if (segmentIndex != null) {
+      args.push(`"${parsedInput.dir}/${SPLIT_SEGMENT_FOLDER}/${quality}_${segmentIndex}.mp4"`);
+    } else {
+      args.push(`"${parsedInput.dir}/${parsedInput.name}_${quality}.mp4"`);
+    }
     return args;
   }
 
   private createTwoPassesVideoEncodingArgs(options: CreateVideoEncodingArgsOptions & { pass: number }) {
-    const { inputFile, parsedInput, codec, quality, videoParams, sourceInfo, crfKey, advancedSettings, encodingSetting, pass } = options;
+    const { inputFile, parsedInput, codec, quality, videoParams, sourceInfo, crfKey, advancedSettings, encodingSetting, pass,
+      splitFrom, splitDuration, segmentIndex } = options;
     const gopSize = (sourceInfo.fps ? sourceInfo.fps * 2 : 48).toString();
     const videoFilters = this.resolveVideoFilters({ quality, hdrTonemap: false });
     if (pass === 1) {
       const outputName = process.platform === 'win32' ? 'NUL' : '/dev/null';
       const args = [
         '-hide_banner', '-y',
+        '-hwaccel', 'auto',
         '-progress', 'pipe:1',
-        '-loglevel', 'error',
-        '-i', `"${inputFile}"`,
-        ...videoParams,
+        '-loglevel', 'error'
+      ];
+      if (this.UseURLInput) {
+        args.push(
+          '-reconnect', '1',
+          '-reconnect_on_http_error', '400,401,403,408,409,5xx',
+        );
+      }
+      splitFrom && args.push('-ss', splitFrom);
+      args.push('-i', `"${inputFile}"`);
+      splitDuration && args.push('-t', splitDuration);
+      args.push(...videoParams,
         '-g', gopSize,
         '-keyint_min', gopSize,
         '-sc_threshold', '0'
-      ];
+      );
       if (encodingSetting)
         this.resolveEncodingSettings(args, encodingSetting, sourceInfo, crfKey);
       if (codec === VideoCodec.H264)
         this.resolveH264Params(args, advancedSettings, quality, sourceInfo);
+      else if (codec === VideoCodec.AV1)
+        this.resolveSVTAV1Params(args, advancedSettings, sourceInfo);
       args.push(
         '-map', '0:v:0',
         '-vf', videoFilters,
-        //'-movflags', '+faststart',
-        '-passlogfile', `"${parsedInput.dir}/${parsedInput.name}_2pass.log"`,
+        //'-movflags', '+faststart'
+      );
+      if (segmentIndex != null) {
+        args.push('-passlogfile', `"${parsedInput.dir}/${SPLIT_SEGMENT_FOLDER}/${parsedInput.name}_2pass.log"`);
+      } else {
+        args.push('-passlogfile', `"${parsedInput.dir}/${parsedInput.name}_2pass.log"`);
+      }
+      args.push(
         '-pass', '1', '-an',
         '-f', 'null', outputName
       );
@@ -742,35 +936,65 @@ export class VideoService {
     }
     const args = [
       '-hide_banner', '-y',
+      '-hwaccel', 'auto',
       '-progress', 'pipe:1',
-      '-loglevel', 'error',
-      '-i', `"${inputFile}"`,
+      '-loglevel', 'error'
+    ];
+    if (this.UseURLInput) {
+      args.push(
+        '-reconnect', '1',
+        '-reconnect_on_http_error', '400,401,403,408,409,5xx',
+      );
+    }
+    splitFrom && args.push('-ss', splitFrom);
+    args.push('-i', `"${inputFile}"`);
+    splitDuration && args.push('-t', splitDuration);
+    args.push(
       ...videoParams,
       '-g', gopSize,
       '-keyint_min', gopSize,
       '-sc_threshold', '0'
-    ];
+    );
     if (encodingSetting)
       this.resolveEncodingSettings(args, encodingSetting, sourceInfo, crfKey);
     if (codec === VideoCodec.H264)
       this.resolveH264Params(args, advancedSettings, quality, sourceInfo);
+    else if (codec === VideoCodec.AV1)
+      this.resolveSVTAV1Params(args, advancedSettings, sourceInfo);
     args.push(
       '-map', '0:v:0',
       //'-map_metadata', '-1',
       '-map_chapters', '-1',
       '-vf', videoFilters,
-      //'-movflags', '+faststart',
-      '-passlogfile', `"${parsedInput.dir}/${parsedInput.name}_2pass.log"`,
-      '-pass', '2',
-      '-f', 'mp4',
-      `"${parsedInput.dir}/${parsedInput.name}_${quality}.mp4"`
+      //'-movflags', '+faststart'
     );
+    if (segmentIndex != null) {
+      args.push('-passlogfile', `"${parsedInput.dir}/${SPLIT_SEGMENT_FOLDER}/${parsedInput.name}_2pass.log"`);
+    } else {
+      args.push('-passlogfile', `"${parsedInput.dir}/${parsedInput.name}_2pass.log"`);
+    }
+    args.push(
+      '-pass', '2',
+      '-f', 'mp4'
+    );
+    if (segmentIndex != null) {
+      args.push(`"${parsedInput.dir}/${SPLIT_SEGMENT_FOLDER}/${quality}_${segmentIndex}.mp4"`);
+    } else {
+      args.push(`"${parsedInput.dir}/${parsedInput.name}_${quality}.mp4"`);
+    }
     return args;
   }
 
   private resolveEncodingSettings(args: string[], encodingSetting: IEncodingSetting, sourceInfo: VideoSourceInfo,
     crfKey: 'crf' | 'cq' = 'crf') {
-    const crfValue = crfKey === 'crf' ? encodingSetting.crf : encodingSetting.cq;
+    let crfValue = null;
+    if (crfKey === 'crf')
+      if (sourceInfo.codec === 'h265')
+        crfValue = encodingSetting.h265Crf;
+      else
+        crfValue = encodingSetting.crf;
+    else if (crfKey === 'cq')
+      crfValue = encodingSetting.cq;
     crfValue && args.push('-crf', crfValue.toString());
     // Should double the bitrate when the source codec isn't h264 (could be h265, vp9 or av1)
     const baseBitrate = sourceInfo.codec === 'h264' ? sourceInfo.bitrate : sourceInfo.bitrate * 2;
@@ -800,6 +1024,15 @@ export class VideoService {
     }
   }
 
+  private resolveSVTAV1Params(args: string[], advancedSettings: AdvancedVideoSettings, sourceInfo: VideoSourceInfo) {
+    const svtAV1Params = ['tune=0', 'enable-overlays=1', 'film-grain=0', 'scd=1'];
+    if (advancedSettings.h264Tune !== 'animation')
+      svtAV1Params.push('scm=0');
+    const gopSize = (sourceInfo.fps ? sourceInfo.fps * 2 : 48).toString();
+    svtAV1Params.push(`keyint=${gopSize}`);
+    args.push('-svtav1-params', `"${svtAV1Params.join(':')}"`);
+  }
+
   private resolveVideoFilters(options: ResolveVideoFiltersOptions) {
     const videoFilters: string[] = [];
     if (options.quality) {
@@ -809,6 +1042,20 @@ export class VideoService {
       videoFilters.push('zscale=t=linear:npl=100,format=gbrpf32le,tonemap=tonemap=mobius:desat=0,zscale=p=bt709:t=bt709:m=bt709:r=tv:d=error_diffusion,format=yuv420p');
     }
     return videoFilters.join(',');
+  }
+
+  private createConcatSegmentArgs(inputFile: string, parsedInput: path.ParsedPath, outputName: string) {
+    const args = [
+      '-hide_banner', '-y',
+      '-progress', 'pipe:1',
+      '-loglevel', 'error',
+      '-f', 'concat',
+      '-safe', '0',
+      '-i', `"${inputFile}"`,
+      '-c', 'copy',
+      `"${parsedInput.dir}/${outputName}.mp4"`
+    ];
+    return args;
   }
 
   private createMP4BoxPackArgs(input: string, parsedInput: path.ParsedPath, tempFileName: string, playlistName: string) {
@@ -864,7 +1111,7 @@ export class VideoService {
       ffmpeg.stdout.on('data', async (data: string) => {
         const progress = ffmpegHelper.parseProgress(data);
         const percent = ffmpegHelper.progressPercent(progress.outTimeMs, videoDuration * 1000000);
-        stdout.write(`Encoding: ${percent}% - frame: ${progress.frame || 'N/A'} - fps: ${progress.fps || 'N/A'} - bitrate: ${progress.bitrate} - time: ${progress.outTime}\r`);
+        stdout.write(`${ffmpegHelper.getProgressMessage(progress, percent)}\r`);
       });
 
       ffmpeg.stderr.setEncoding('utf8');
@@ -1031,13 +1278,29 @@ export class VideoService {
     }
   }
 
-  private async findAvailableQuality(uploadedFiles: RcloneFile[], allQualityList: number[], parsedInput: path.ParsedPath,
+  private async getLinkedSourceUrl(job: Job<IVideoData>) {
+    let externalStorage;
+    if (job.data.linkedStorage)
+      externalStorage = await externalStorageModel.findOne({ _id: BigInt(job.data.linkedStorage) }, { publicUrl: 1 }).lean().exec();
+    else
+      externalStorage = await externalStorageModel.findOne({ _id: BigInt(job.data.storage) }, { publicUrl: 1 }).lean().exec();
+    if (!externalStorage) {
+      const statusError = await this.generateStatusError(StatusCode.STORAGE_NOT_FOUND, job);
+      throw new Error(statusError.errorCode);
+    }
+    if (!externalStorage.publicUrl)
+      return null;
+    return externalStorage.publicUrl.replace(':path', encodeURIComponent('/' + job.data.path + '/' + job.data.filename));
+  }
+
+  private async findAvailableQuality(uploadedFiles: string[], allQualityList: number[], parsedInput: path.ParsedPath,
     codec: number, replaceStreams: string[] = [], job: Job<IVideoData>) {
     const fileIds: bigint[] = [];
     for (let i = 0; i < uploadedFiles.length; i++) {
-      if (!allQualityList.find(q => uploadedFiles[i].Name === `${parsedInput.name}_${q}.mp4`))
+      const uploadedFileName = uploadedFiles[i].split('/').pop();
+      if (!allQualityList.find(q => uploadedFileName === `${parsedInput.name}_${q}.mp4`))
         continue;
-      const stringId = uploadedFiles[i].Path.split('/')[0];
+      const stringId = uploadedFiles[i].split('/')[0];
       if (replaceStreams.includes(stringId))
         continue;
       if (isNaN(<any>stringId))
@@ -1054,7 +1317,7 @@ export class VideoService {
     return availableQualityList;
   }
 
-  private calculateQuality(height: number, qualityList: number[], forcedQualityList: number[] = []) {
+  private calculateQuality(height: number, qualityList: number[], forcedQualityList: number[] = [], fallbackQualityList: number[] = []) {
     const availableQualityList: number[] = [];
     if (!height) return availableQualityList;
     for (let i = 0; i < qualityList.length; i++) {
@@ -1064,24 +1327,26 @@ export class VideoService {
     }
     // Use the lowest quality when there is no suitable one
     if (!availableQualityList.length)
-      availableQualityList.push(Math.min(...qualityList));
+      availableQualityList.push(...fallbackQualityList);
     return availableQualityList;
   }
 
-  private async validateSourceQuality(parsedInput: path.ParsedPath, quality: number, qualityList: number[], codec: number,
-    retryFromInterruption: boolean, job: Job<IVideoData>): Promise<number[] | null> {
-    const forcedQualityList = job.data.advancedOptions?.forceVideoQuality || [];
-    const allQualityList = this.calculateQuality(quality, qualityList, forcedQualityList);
+  private async validateSourceQuality(options: ValidateSourceQualityOptions): Promise<number[] | null> {
+    const { parsedInput, quality, qualityList, forcedQualityList, fallbackQualityList, codec, retryFromInterruption, job } = options;
+    const allQualityList = this.calculateQuality(quality, qualityList, forcedQualityList, fallbackQualityList);
     this.logger.info(`All quality: ${allQualityList.length ? allQualityList.join(', ') : 'None'}`);
-    if (!allQualityList.length) {
-      const statusError = await this.generateStatusError(StatusCode.LOW_QUALITY_VIDEO, job, { discard: true });
-      throw new UnrecoverableError(statusError.errorCode);
-    }
+    // if (!allQualityList.length) {
+    //   const statusError = await this.generateStatusError(StatusCode.LOW_QUALITY_VIDEO, job, { discard: true });
+    //   throw new UnrecoverableError(statusError.errorCode);
+    // }
     let availableQualityList: number[];
     if (!retryFromInterruption) {
       // Check already encoded files
       this.logger.info('Checking already encoded files');
-      let alreadyEncodedFiles = await this.findUploadedFiles(job.data.storage, job.data._id, job.id, `${this.thumbnailFolder}/**`);
+      let alreadyEncodedFiles: string[] = [];
+      const existingManifestData = await this.findExistingManifest(job.data.storage, job.data._id, codec);
+      if (existingManifestData?.videoTracks)
+        alreadyEncodedFiles = existingManifestData.videoTracks.map(t => t.uri);
       availableQualityList = await this.findAvailableQuality(alreadyEncodedFiles, allQualityList, parsedInput, codec,
         job.data.replaceStreams, job);
       this.logger.info(`Available quality: ${availableQualityList.length ? availableQualityList.join(', ') : 'None'}`);
@@ -1111,6 +1376,9 @@ export class VideoService {
   private async findExistingManifest(remote: string, parentFolder: string, codec: number) {
     const rcloneConfigFile = this.configService.get<string>('RCLONE_CONFIG_FILE');
     const rcloneDir = this.configService.get<string>('RCLONE_DIR');
+    const isFolderExist = await rcloneHelper.isPathExist(rcloneConfigFile, rcloneDir, remote, parentFolder);
+    if (!isFolderExist)
+      return null;
     const [manifestFileInfo] = await rcloneHelper.listRemoteJson(rcloneConfigFile, rcloneDir, remote, parentFolder, {
       filesOnly: true,
       recursive: true,

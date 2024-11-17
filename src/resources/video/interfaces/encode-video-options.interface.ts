@@ -7,6 +7,7 @@ import { StreamManifest } from '../../../utils';
 export interface EncodeVideoOptions {
   inputFile: string;
   parsedInput: ParsedPath;
+  inputFileUrl: string;
   sourceInfo: VideoSourceInfo;
   qualityList: number[];
   encodingSettings: IEncodingSetting[];
@@ -27,6 +28,9 @@ export interface CreateVideoEncodingArgsOptions {
   crfKey: 'crf' | 'cq';
   advancedSettings: AdvancedVideoSettings;
   encodingSetting?: IEncodingSetting;
+  splitFrom?: string;
+  splitDuration?: string;
+  segmentIndex?: number;
 }
 
 export interface VideoSourceInfo {

@@ -12,6 +12,7 @@ interface IExternalStorage {
   folderId: string;
   folderName: string;
   publicUrl: string;
+  secondPublicUrl: string;
   inStorage: string;
   used: number;
   files: bigint[];
@@ -29,6 +30,7 @@ const externalStorageSchema = new Schema<IExternalStorage>({
   folderId: { type: String },
   folderName: { type: String },
   publicUrl: { type: String },
+  secondPublicUrl: { type: String },
   inStorage: { type: String },
   used: { type: Number, default: 0 },
   files: { type: [Schema.Types.Mixed] }

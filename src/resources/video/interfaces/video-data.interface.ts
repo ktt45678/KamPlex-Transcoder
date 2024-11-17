@@ -15,6 +15,7 @@ export interface IVideoData {
   //av1Params: string;
   //qualityList: number[];
   //encodingSettings: IEncodingSetting[];
+  codec: number;
   linkedStorage?: string;
   advancedOptions: IAdvancedOptions;
   isPrimary: boolean;
@@ -26,6 +27,7 @@ export interface IVideoData {
 export interface IEncodingSetting {
   quality: number;
   crf: number;
+  h265Crf: number;
   cq: number;
   maxrate: number;
   bufsize: number;

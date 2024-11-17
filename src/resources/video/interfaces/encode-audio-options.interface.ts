@@ -8,6 +8,7 @@ import { IVideoData } from './video-data.interface';
 export interface EncodeAudioByTrackOptions {
   inputFile: string;
   parsedInput: ParsedPath;
+  inputFileUrl?: string;
   type: 'normal' | 'surround';
   audioTrack: FFprobe.FFProbeStream;
   audioAACParams: string[];
@@ -22,6 +23,7 @@ export interface EncodeAudioByTrackOptions {
 export interface EncodeAudioOptions {
   inputFile: string;
   parsedInput: ParsedPath;
+  inputFileUrl?: string;
   sourceInfo: AudioSourceInfo;
   audioTrackIndex: number;
   codec: number;

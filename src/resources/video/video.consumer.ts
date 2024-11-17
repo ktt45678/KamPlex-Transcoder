@@ -62,6 +62,23 @@ export class VideoCosumerH264 extends BaseVideoConsumer {
   }
 }
 
+@Processor(`${TaskQueue.VIDEO_TRANSCODE}:${VideoCodec.H265}`, { concurrency: 1 })
+export class VideoCosumerH265 extends BaseVideoConsumer {
+  constructor(@Inject(WINSTON_MODULE_PROVIDER) protected readonly logger: Logger, private readonly videoService: VideoService) {
+    super(logger);
+  }
+
+  async process(job: Job<IVideoData, any, string>) {
+    const result = await this.videoService.transcode(job, VideoCodec.H265);
+    return result;
+  }
+
+  @OnWorkerEvent('active')
+  onActive(job: Job) {
+    this.logger.info(`Processing job ${job.id} of type H265`);
+  }
+}
+
 @Processor(`${TaskQueue.VIDEO_TRANSCODE}:${VideoCodec.VP9}`, { concurrency: 1 })
 export class VideoCosumerVP9 extends BaseVideoConsumer {
   constructor(@Inject(WINSTON_MODULE_PROVIDER) protected readonly logger: Logger, private readonly videoService: VideoService) {
@@ -92,6 +109,6 @@ export class VideoCosumerAV1 extends BaseVideoConsumer {
 
   @OnWorkerEvent('active')
   onActive(job: Job) {
-    this.logger.info(`Processing job ${job.id} of type VP9`);
+    this.logger.info(`Processing job ${job.id} of type AV1`);
   }
 }

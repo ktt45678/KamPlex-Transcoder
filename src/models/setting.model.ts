@@ -8,15 +8,18 @@ interface ISetting {
   audioSurroundParams: string;
   audioSurroundOpusParams: string;
   videoH264Params: string;
+  videoH265Params: string;
   videoVP9Params: string;
   videoAV1Params: string;
   videoQualityList: number[];
+  videoNextGenQualityList: number[];
   videoEncodingSettings: IEncodingSetting[];
 }
 
 interface IEncodingSetting {
   quality: number;
   crf: number;
+  h265Crf: number;
   cq: number;
   maxrate: number;
   bufsize: number;
@@ -39,9 +42,11 @@ const settingSchema = new Schema<ISetting>({
   audioSurroundParams: { type: String },
   audioSurroundOpusParams: { type: String },
   videoH264Params: { type: String },
+  videoH265Params: { type: String },
   videoVP9Params: { type: String },
   videoAV1Params: { type: String },
   videoQualityList: { type: [Number] },
+  videoNextGenQualityList: { type: [Number] },
   videoEncodingSettings: { type: [encodingSettingSchema] }
 });
 

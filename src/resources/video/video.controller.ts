@@ -1,10 +1,11 @@
-import { Controller, Post } from '@nestjs/common';
+import { Controller, Get, Post } from '@nestjs/common';
 
 import { BaseVideoConsumer } from './video.consumer';
+import { VideoService } from './video.service';
 
 @Controller('video')
 export class VideoController {
-  constructor(private consumer: BaseVideoConsumer) { }
+  constructor(private consumer: BaseVideoConsumer, private videoService: VideoService) { }
 
   @Post('pause')
   pauseWorker(): Promise<void> {
@@ -19,5 +20,11 @@ export class VideoController {
   @Post('close')
   closeWorker(): Promise<void> {
     return this.consumer.closeWorker();
+  }
+
+  @Get('transcoder-priority')
+  getTranscoderPriority() {
+    const priority = this.videoService.getTranscoderPriority();
+    return { priority };
   }
 }

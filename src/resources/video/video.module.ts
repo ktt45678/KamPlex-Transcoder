@@ -1,16 +1,19 @@
 import { Module } from '@nestjs/common';
 import { BullModule } from '@nestjs/bullmq';
+import { ConfigService } from '@nestjs/config';
+import { WINSTON_MODULE_PROVIDER } from 'nest-winston';
+import { Logger } from 'winston';
 
 import { VideoService } from './video.service';
-import { BaseVideoConsumer, VideoCosumerAV1, VideoCosumerH264, VideoCosumerVP9 } from './video.consumer';
+import { BaseVideoConsumer, VideoCosumerAV1, VideoCosumerH264, VideoCosumerH265, VideoCosumerVP9 } from './video.consumer';
 import { KamplexApiModule } from '../../common/modules/kamplex-api';
+import { TranscoderApiModule } from '../../common/modules/transcoder-api';
 import { TaskQueue, VideoCodec } from '../../enums';
 import { VideoController } from './video.controller';
 
-const targetConsumer = getTargetConsumer();
-
-function getTargetConsumer() {
-  const consumerCodec = +process.env.VIDEO_CODEC;
+function getTargetConsumer(consumerCodec: number) {
+  if (consumerCodec === VideoCodec.H265)
+    return VideoCosumerH265;
   if (consumerCodec === VideoCodec.AV1)
     return VideoCosumerAV1;
   else if (consumerCodec === VideoCodec.VP9)
@@ -28,13 +31,19 @@ function getTargetConsumer() {
         attempts: 3
       }
     }),
-    KamplexApiModule
+    KamplexApiModule,
+    TranscoderApiModule
   ],
   providers: [
     VideoService,
     {
       provide: BaseVideoConsumer,
-      useClass: targetConsumer
+      useFactory: (configService: ConfigService, logger: Logger, videoService: VideoService) => {
+        const consumerCodec = +configService.get<string>('VIDEO_CODEC');
+        const ctr = getTargetConsumer(consumerCodec);
+        return new ctr(logger, videoService);
+      },
+      inject: [ConfigService, WINSTON_MODULE_PROVIDER, VideoService]
     }
   ],
   exports: [VideoService],

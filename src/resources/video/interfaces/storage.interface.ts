@@ -10,6 +10,7 @@ export class IStorage {
   kind: number;
   folderName: string;
   publicUrl: string;
+  secondPublicUrl: string;
   inStorage: string;
   used: number;
   files: bigint[];

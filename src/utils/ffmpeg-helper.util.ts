@@ -51,6 +51,10 @@ export class FFmpegHelper {
     return videoDuration ? Math.trunc(current / videoDuration * 100) : 0;
   }
 
+  getProgressMessage(progress: Progress, percent: number) {
+    return `Encoding: ${percent}% - frame: ${progress.frame || 'N/A'} - fps: ${progress.fps || 'N/A'} - bitrate: ${progress.bitrate} - time: ${progress.outTime} - speed: ${progress.speed}`;
+  }
+
   findH264ProfileLevel(srcWidth: number, srcHeight: number, targetHeight: number, fps: number) {
     const targetWidth = targetHeight * srcWidth / srcHeight;
     const targetFrameSize = targetWidth * targetHeight;

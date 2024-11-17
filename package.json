@@ -33,6 +33,7 @@
     "axios": "1.6.5",
     "bullmq": "5.12.0",
     "check-disk-space": "3.4.0",
+    "chokidar": "3.5.2",
     "fast-xml-parser": "4.3.3",
     "ffprobe-client": "1.1.6",
     "ioredis": "5.4.1",
