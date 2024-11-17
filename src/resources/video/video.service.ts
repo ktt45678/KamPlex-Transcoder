@@ -1025,7 +1025,7 @@ export class VideoService {
   }
 
   private resolveSVTAV1Params(args: string[], advancedSettings: AdvancedVideoSettings, sourceInfo: VideoSourceInfo) {
-    const svtAV1Params = ['tune=0', 'enable-overlays=1', 'film-grain=0', 'scd=1'];
+    const svtAV1Params = ['tune=3', 'enable-overlays=1', 'film-grain=0', 'scd=1'];
     if (advancedSettings.h264Tune !== 'animation')
       svtAV1Params.push('scm=0');
     const gopSize = (sourceInfo.fps ? sourceInfo.fps * 2 : 48).toString();
