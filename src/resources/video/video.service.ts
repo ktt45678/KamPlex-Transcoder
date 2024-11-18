@@ -668,7 +668,7 @@ export class VideoService {
     }
   }
 
-  private async splitAndEncodeVideo(options: EncodeVideoOptions, quality: number, perQualitySettings: IEncodingSetting, segmentDuration: number = 15) {
+  private async splitAndEncodeVideo(options: EncodeVideoOptions, quality: number, perQualitySettings: IEncodingSetting, segmentDuration: number = 30) {
     const { inputFile, parsedInput, inputFileUrl, sourceInfo, advancedSettings = {}, codec, videoParams, job } = options;
     const totalSegments = Math.ceil(sourceInfo.duration / segmentDuration);
     const segmentFolder = `${parsedInput.dir}/${SPLIT_SEGMENT_FOLDER}`;
@@ -1025,7 +1025,7 @@ export class VideoService {
   }
 
   private resolveSVTAV1Params(args: string[], advancedSettings: AdvancedVideoSettings, sourceInfo: VideoSourceInfo) {
-    const svtAV1Params = ['tune=3', 'enable-overlays=1', 'film-grain=0', 'scd=1'];
+    const svtAV1Params = ['tune=0', 'enable-overlays=1', 'film-grain=0', 'film-grain-denoise=0', 'scd=1'];
     if (advancedSettings.h264Tune !== 'animation')
       svtAV1Params.push('scm=0');
     const gopSize = (sourceInfo.fps ? sourceInfo.fps * 2 : 48).toString();
