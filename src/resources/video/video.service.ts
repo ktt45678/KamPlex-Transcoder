@@ -841,7 +841,8 @@ export class VideoService {
     const { inputFile, parsedInput, codec, quality, videoParams, sourceInfo, crfKey, advancedSettings, encodingSetting,
       splitFrom, splitDuration, segmentIndex } = options;
     const gopSize = (sourceInfo.fps ? sourceInfo.fps * 2 : 48).toString();
-    const videoFilters = this.resolveVideoFilters({ quality, hdrTonemap: sourceInfo.isHDR });
+    const bitDepth = codec === VideoCodec.H264 ? 8 : 10;
+    const videoFilters = this.resolveVideoFilters({ quality, hdrTonemap: sourceInfo.isHDR, bitDepth });
     const args: string[] = [
       '-hide_banner', '-y',
       '-hwaccel', 'auto',
@@ -889,7 +890,8 @@ export class VideoService {
     const { inputFile, parsedInput, codec, quality, videoParams, sourceInfo, crfKey, advancedSettings, encodingSetting, pass,
       splitFrom, splitDuration, segmentIndex } = options;
     const gopSize = (sourceInfo.fps ? sourceInfo.fps * 2 : 48).toString();
-    const videoFilters = this.resolveVideoFilters({ quality, hdrTonemap: false });
+    const bitDepth = codec === VideoCodec.H264 ? 8 : 10;
+    const videoFilters = this.resolveVideoFilters({ quality, hdrTonemap: false, bitDepth });
     if (pass === 1) {
       const outputName = process.platform === 'win32' ? 'NUL' : '/dev/null';
       const args = [
@@ -1025,7 +1027,7 @@ export class VideoService {
   }
 
   private resolveSVTAV1Params(args: string[], advancedSettings: AdvancedVideoSettings, sourceInfo: VideoSourceInfo) {
-    const svtAV1Params = ['tune=0', 'enable-overlays=1', 'film-grain=0', 'film-grain-denoise=0', 'scd=1'];
+    const svtAV1Params = ['tune=0', 'enable-overlays=1', 'film-grain=0', 'film-grain-denoise=0', 'frame-luma-bias=30', 'scd=1'];
     if (advancedSettings.h264Tune !== 'animation')
       svtAV1Params.push('scm=0');
     const gopSize = (sourceInfo.fps ? sourceInfo.fps * 2 : 48).toString();
@@ -1039,7 +1041,12 @@ export class VideoService {
       videoFilters.push(`scale=-2:${options.quality}`);
     }
     if (options.hdrTonemap) {
-      videoFilters.push('zscale=t=linear:npl=100,format=gbrpf32le,tonemap=tonemap=mobius:desat=0,zscale=p=bt709:t=bt709:m=bt709:r=tv:d=error_diffusion,format=yuv420p');
+      videoFilters.push('zscale=t=linear:npl=100,format=gbrpf32le,tonemap=tonemap=mobius:desat=0,zscale=p=bt709:t=bt709:m=bt709:r=tv:d=error_diffusion');
+      if (options.bitDepth === 10) {
+        videoFilters.push('format=yuv420p10le');
+      } else {
+        videoFilters.push('format=yuv420p');
+      }
     }
     return videoFilters.join(',');
   }

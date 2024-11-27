@@ -53,4 +53,5 @@ export interface AdvancedVideoSettings {
 export interface ResolveVideoFiltersOptions {
   quality?: number;
   hdrTonemap?: boolean;
+  bitDepth?: number;
 }

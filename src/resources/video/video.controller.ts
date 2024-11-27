@@ -1,4 +1,5 @@
 import { Controller, Get, Post } from '@nestjs/common';
+import { RouteConfig } from '@nestjs/platform-fastify';
 
 import { BaseVideoConsumer } from './video.consumer';
 import { VideoService } from './video.service';
@@ -23,6 +24,7 @@ export class VideoController {
   }
 
   @Get('transcoder-priority')
+  @RouteConfig({ logLevel: 'warn' })
   getTranscoderPriority() {
     const priority = this.videoService.getTranscoderPriority();
     return { priority };
