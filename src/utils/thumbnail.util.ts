@@ -358,7 +358,7 @@ function generateThumbnails(inputFile: string, outputFolder: string, maxWidth: n
       if (isCancelled) {
         reject(RejectCode.JOB_CANCEL);
       } else if (code !== 0) {
-        reject(`FFmpeg exited with status code: ${code}`);
+        reject({ code, message: `FFmpeg exited with status code: ${code}` });
       } else {
         resolve(generatedFrames);
       }

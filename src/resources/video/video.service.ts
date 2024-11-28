@@ -42,6 +42,8 @@ export class VideoService {
   private UseURLInput: boolean;
   private SplitEncoding: boolean;
   private CanceledJobIds: (string | number)[];
+  private RetryEncoding: boolean;
+  private CanRetryEncoding: boolean;
   private TranscoderPriority: number;
   private thumbnailFolder: string;
 
@@ -68,6 +70,8 @@ export class VideoService {
     this.UseURLInput = this.configService.get<string>('USE_URL_INPUT') === 'true';
     this.SplitEncoding = this.configService.get<string>('SPLIT_ENCODING') === 'true';
     this.CanceledJobIds = [];
+    this.RetryEncoding = false;
+    this.CanRetryEncoding = false;
     this.TranscoderPriority = 0;
     this.thumbnailFolder = 'thumbnails';
   }
@@ -464,6 +468,10 @@ export class VideoService {
     return job.data;
   }
 
+  setRetryEncoding() {
+    this.RetryEncoding = true;
+  }
+
   getTranscoderPriority() {
     return this.TranscoderPriority;
   }
@@ -603,7 +611,8 @@ export class VideoService {
           }
           this.setTranscoderPriority(0);
         } else {
-          await this.splitAndEncodeVideo(options, qualityList[i], perQualitySettings);
+          const segmentDuration = +this.configService.get('SPLIT_SEGMENT_DURATION') || 30;
+          await this.splitAndEncodeVideo(options, qualityList[i], perQualitySettings, segmentDuration);
         }
 
         this.setTranscoderPriority(1);
@@ -670,9 +679,9 @@ export class VideoService {
 
   private async splitAndEncodeVideo(options: EncodeVideoOptions, quality: number, perQualitySettings: IEncodingSetting, segmentDuration: number = 30) {
     const { inputFile, parsedInput, inputFileUrl, sourceInfo, advancedSettings = {}, codec, videoParams, job } = options;
-    const totalSegments = Math.ceil(sourceInfo.duration / segmentDuration);
     const segmentFolder = `${parsedInput.dir}/${SPLIT_SEGMENT_FOLDER}`;
     const concatSegmentFile = `${segmentFolder}/${CONCAT_SEGMENT_FILE}`;
+    let totalSegments = Math.ceil(sourceInfo.duration / segmentDuration);
     this.logger.info(`Total segments: ${totalSegments}`);
 
     //Create segment folder
@@ -680,33 +689,71 @@ export class VideoService {
     this.setTranscoderPriority(1);
 
     for (let i = 0; i < totalSegments; i++) {
-      await this.transcoderApiService.checkAndWaitForTranscoderPriority();
-      const startTime = i * segmentDuration;
-      this.logger.info(`Segments ${i + 1}/${totalSegments}`);
-      if (codec === VideoCodec.H264 || codec === VideoCodec.H265 || codec === VideoCodec.AV1) {
-        const crfKey = codec === VideoCodec.AV1 ? 'cq' : 'crf';
-        const videoArgs = this.createVideoEncodingArgs({
-          inputFile: inputFileUrl || inputFile, parsedInput, codec, quality, videoParams,
-          sourceInfo, crfKey, advancedSettings, encodingSetting: perQualitySettings, splitFrom: startTime.toString(),
-          splitDuration: segmentDuration.toString(), segmentIndex: i
-        });
-        await this.encodeMedia(videoArgs, segmentDuration, job.id);
-      } else {
-        // Pass 1 params
-        const videoPass1Args = this.createTwoPassesVideoEncodingArgs({
-          inputFile: inputFileUrl || inputFile, parsedInput, codec, quality, videoParams,
-          sourceInfo, crfKey: 'cq', advancedSettings, encodingSetting: perQualitySettings, pass: 1, splitFrom: startTime.toString(),
-          splitDuration: segmentDuration.toString(), segmentIndex: i
-        });
-        // Pass 2 params
-        const videoPass2Args = this.createTwoPassesVideoEncodingArgs({
-          inputFile: inputFileUrl || inputFile, parsedInput, codec, quality, videoParams,
-          sourceInfo, crfKey: 'cq', advancedSettings, encodingSetting: perQualitySettings, pass: 2, splitFrom: startTime.toString(),
-          splitDuration: segmentDuration.toString(), segmentIndex: i
-        });
+      const handleSegmentError = () => {
+        this.logger.info('Received error 139 from FFmpeg');
+        const oldTotalSegments = totalSegments;
+        // Reduce duration by 10 second, but not below 10
+        segmentDuration = Math.max(10, segmentDuration - 10);
+        totalSegments = Math.ceil(sourceInfo.duration / segmentDuration);
+        if (totalSegments !== oldTotalSegments)
+          i = Math.ceil(i * totalSegments / oldTotalSegments);
+        this.logger.info(`New segment duration: ${segmentDuration}, total segments: ${totalSegments}, segment: ${i + 1}`);
+      };
 
-        await this.encodeMedia(videoPass1Args, segmentDuration, job.id);
-        await this.encodeMedia(videoPass2Args, segmentDuration, job.id);
+      while (true) {
+        await this.transcoderApiService.checkAndWaitForTranscoderPriority();
+        const startTime = i * segmentDuration;
+        this.logger.info(`Segments ${i + 1}/${totalSegments}`);
+        this.CanRetryEncoding = true;
+        if (codec === VideoCodec.H264 || codec === VideoCodec.H265 || codec === VideoCodec.AV1) {
+          const crfKey = codec === VideoCodec.AV1 ? 'cq' : 'crf';
+          const videoArgs = this.createVideoEncodingArgs({
+            inputFile: inputFileUrl || inputFile, parsedInput, codec, quality, videoParams,
+            sourceInfo, crfKey, advancedSettings, encodingSetting: perQualitySettings, splitFrom: startTime.toString(),
+            splitDuration: segmentDuration.toString(), segmentIndex: i
+          });
+          try {
+            await this.encodeMedia(videoArgs, segmentDuration, job.id);
+          } catch (e) {
+            if (e === RejectCode.RETRY_ENCODING) {
+              this.logger.info('Retrying encoding');
+              continue;
+            } else if (e.code === 139) {
+              // Handle Segmentation fault error
+              handleSegmentError();
+              continue;
+            }
+            throw e;
+          }
+        } else {
+          // Pass 1 params
+          const videoPass1Args = this.createTwoPassesVideoEncodingArgs({
+            inputFile: inputFileUrl || inputFile, parsedInput, codec, quality, videoParams,
+            sourceInfo, crfKey: 'cq', advancedSettings, encodingSetting: perQualitySettings, pass: 1, splitFrom: startTime.toString(),
+            splitDuration: segmentDuration.toString(), segmentIndex: i
+          });
+          // Pass 2 params
+          const videoPass2Args = this.createTwoPassesVideoEncodingArgs({
+            inputFile: inputFileUrl || inputFile, parsedInput, codec, quality, videoParams,
+            sourceInfo, crfKey: 'cq', advancedSettings, encodingSetting: perQualitySettings, pass: 2, splitFrom: startTime.toString(),
+            splitDuration: segmentDuration.toString(), segmentIndex: i
+          });
+          try {
+            await this.encodeMedia(videoPass1Args, segmentDuration, job.id);
+            await this.encodeMedia(videoPass2Args, segmentDuration, job.id);
+          } catch (e) {
+            if (e === RejectCode.RETRY_ENCODING) {
+              this.logger.info('Retrying encoding');
+              continue;
+            } else if (e.code === 139) {
+              handleSegmentError();
+              continue;
+            }
+            throw e;
+          }
+        }
+        this.CanRetryEncoding = false;
+        break;
       }
 
       await fileHelper.appendToFile(concatSegmentFile, `file '${quality}_${i}.mp4'\n`);
@@ -1110,6 +1157,7 @@ export class VideoService {
   private encodeMedia(args: string[], videoDuration: number, jobId: string | number) {
     return new Promise<void>((resolve, reject) => {
       let isCancelled = false;
+      let isRetryEncoding = false;
 
       this.logger.info('ffmpeg ' + args.join(' '));
       const ffmpeg = child_process.spawn(`"${this.configService.get<string>('FFMPEG_DIR')}/ffmpeg"`, args, { shell: true });
@@ -1132,13 +1180,22 @@ export class VideoService {
         ffmpeg.stdin.end();
       });
 
+      const retryEncodingChecker = this.createRetryEncodingChecker(() => {
+        isRetryEncoding = true;
+        ffmpeg.stdin.write('q');
+        ffmpeg.stdin.end();
+      });
+
       ffmpeg.on('exit', (code: number) => {
         stdout.write('\n');
         clearInterval(cancelledJobChecker);
+        clearInterval(retryEncodingChecker);
         if (isCancelled) {
           reject(RejectCode.JOB_CANCEL);
+        } else if (isRetryEncoding) {
+          reject(RejectCode.RETRY_ENCODING)
         } else if (code !== 0) {
-          reject(`FFmpeg exited with status code: ${code}`);
+          reject({ code, message: `FFmpeg exited with status code: ${code}` });
         } else {
           resolve();
         }
@@ -1215,6 +1272,16 @@ export class VideoService {
       const index = this.CanceledJobIds.findIndex(j => +j === +jobId);
       if (index === -1) return;
       this.CanceledJobIds = this.CanceledJobIds.filter(id => +id > +jobId);
+      // Exec callback
+      exec();
+    }, ms)
+  }
+
+  private createRetryEncodingChecker(exec: () => void, ms: number = 5000) {
+    if (!this.CanRetryEncoding) return null;
+    return setInterval(() => {
+      if (!this.RetryEncoding) return;
+      this.RetryEncoding = false;
       // Exec callback
       exec();
     }, ms)

@@ -1,3 +1,4 @@
 export enum RejectCode {
-  JOB_CANCEL = 'JOB_CANCEL'
+  JOB_CANCEL = 'JOB_CANCEL',
+  RETRY_ENCODING = 'RETRY_ENCODING'
 }

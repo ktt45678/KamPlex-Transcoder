@@ -1,4 +1,4 @@
-import { Controller, Get, Post } from '@nestjs/common';
+import { Controller, Get, HttpCode, Post } from '@nestjs/common';
 import { RouteConfig } from '@nestjs/platform-fastify';
 
 import { BaseVideoConsumer } from './video.consumer';
@@ -21,6 +21,12 @@ export class VideoController {
   @Post('close')
   closeWorker(): Promise<void> {
     return this.consumer.closeWorker();
+  }
+
+  @Post('retry-encoding')
+  @HttpCode(204)
+  retryEncoding() {
+    this.videoService.setRetryEncoding();
   }
 
   @Get('transcoder-priority')

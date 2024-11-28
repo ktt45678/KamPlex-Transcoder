@@ -122,7 +122,7 @@ export class VideoSourceHelper {
         if (isCancelled) {
           reject(RejectCode.JOB_CANCEL);
         } else if (code !== 0) {
-          reject(`FFmpeg exited with status code: ${code}`);
+          reject({ code, message: `FFmpeg exited with status code: ${code}` });
         } else {
           stdout.write(`Uploading remaining segments\n`);
           rclone = uploadSegment(`"${outputFolder}"`);
@@ -204,7 +204,7 @@ export class VideoSourceHelper {
         if (isCancelled) {
           reject(RejectCode.JOB_CANCEL);
         } else if (code !== 0) {
-          reject(`FFmpeg exited with status code: ${code}`);
+          reject({ code, message: `FFmpeg exited with status code: ${code}` });
         } else {
           resolve();
         }
