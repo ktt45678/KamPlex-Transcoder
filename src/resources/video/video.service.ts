@@ -689,17 +689,16 @@ export class VideoService {
     this.setTranscoderPriority(1);
 
     for (let i = 0; i < totalSegments; i++) {
-      const handleSegmentError = () => {
-        this.logger.info('Received error 139 from FFmpeg');
-        const oldTotalSegments = totalSegments;
-        // Reduce duration by 10 second, but not below 10
-        segmentDuration = Math.max(10, segmentDuration - 10);
-        totalSegments = Math.ceil(sourceInfo.duration / segmentDuration);
-        if (totalSegments !== oldTotalSegments)
-          i = Math.ceil(i * totalSegments / oldTotalSegments);
-        this.logger.info(`New segment duration: ${segmentDuration}, total segments: ${totalSegments}, segment: ${i + 1}`);
-      };
-
+      // const handleSegmentError = () => {
+      //   this.logger.info('Received error 139 from FFmpeg');
+      //   const oldTotalSegments = totalSegments;
+      //   // Reduce duration by 10 second, but not below 10
+      //   segmentDuration = Math.max(10, segmentDuration - 10);
+      //   totalSegments = Math.ceil(sourceInfo.duration / segmentDuration);
+      //   if (totalSegments !== oldTotalSegments)
+      //     i = Math.ceil(i * totalSegments / oldTotalSegments);
+      //   this.logger.info(`New segment duration: ${segmentDuration}, total segments: ${totalSegments}, segment: ${i + 1}`);
+      // };
       while (true) {
         await this.transcoderApiService.checkAndWaitForTranscoderPriority();
         const startTime = i * segmentDuration;
@@ -716,11 +715,11 @@ export class VideoService {
             await this.encodeMedia(videoArgs, segmentDuration, job.id);
           } catch (e) {
             if (e === RejectCode.RETRY_ENCODING) {
-              this.logger.info('Retrying encoding');
+              this.logger.info('Retrying encoding (user input)');
               continue;
             } else if (e.code === 139) {
               // Handle Segmentation fault error
-              handleSegmentError();
+              this.logger.info('Received error 139 from FFmpeg, retrying...');
               continue;
             }
             throw e;
@@ -743,10 +742,10 @@ export class VideoService {
             await this.encodeMedia(videoPass2Args, segmentDuration, job.id);
           } catch (e) {
             if (e === RejectCode.RETRY_ENCODING) {
-              this.logger.info('Retrying encoding');
+              this.logger.info('Retrying encoding (user input)');
               continue;
             } else if (e.code === 139) {
-              handleSegmentError();
+              this.logger.info('Received error 139 from FFmpeg, retrying...');
               continue;
             }
             throw e;
@@ -1130,7 +1129,7 @@ export class VideoService {
       '--config', rcloneConfigFile,
       '--low-level-retries', '5',
       '-v', '--use-json-log',
-      '--stats', '3m',
+      '--stats', '3s',
       'move', `"${source}"`, `"${dest}"`
     ];
     if (include) {
@@ -1146,7 +1145,7 @@ export class VideoService {
       '--config', rcloneConfigFile,
       '--low-level-retries', '5',
       '-v', '--use-json-log',
-      '--stats', '3m',
+      '--stats', '3s',
       targetCommand,
       `"${transcodeDir}/${this.thumbnailFolder}"`,
       `"${remote}:${parentFolder}/${this.thumbnailFolder}"`

@@ -7,7 +7,10 @@ import { PORT, ADDRESS } from './config';
 import { mongooseHelper } from './utils';
 
 async function bootstrap() {
-  const app = await NestFactory.create<NestFastifyApplication>(AppModule, new FastifyAdapter({ logger: true }));
+  const app = await NestFactory.create<NestFastifyApplication>(AppModule, new FastifyAdapter({
+    logger: true,
+    disableRequestLogging: true
+  }));
   app.enableCors();
   app.useLogger(app.get(WINSTON_MODULE_NEST_PROVIDER));
   const port = process.env.PORT || PORT;

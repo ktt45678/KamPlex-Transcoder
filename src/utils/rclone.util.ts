@@ -49,7 +49,7 @@ export class RcloneHelper {
       '--config', `"${configPath}"`,
       '--low-level-retries', '5',
       '-v', '--use-json-log',
-      '--stats', '3m',
+      '--stats', '3s',
       'copy', ...copyArgs
     ];
     logFn(args);
@@ -356,7 +356,10 @@ export class RcloneHelper {
       return null;
     }
     if (logJson.msg)
-      logJson.msg = logJson.msg.replace(new RegExp('\r|\n|\t', 'g'), ' ').replace(/ +(?= )/g, '');
+      logJson.msg = logJson.msg
+        .replace(new RegExp('\r|\n|\t', 'g'), ' ')
+        .replace(/ +(?= )/g, '')
+        .replace(/Checking: Transferring: .+/g, '');
     return logJson;
   }
 }
