@@ -359,7 +359,8 @@ export class RcloneHelper {
       logJson.msg = logJson.msg
         .replace(new RegExp('\r|\n|\t', 'g'), ' ')
         .replace(/ +(?= )/g, '')
-        .replace(/Checking: Transferring: .+/g, '');
+        .replace(/Checking: Transferring: .+/g, '')
+        .replace(/Transferring: .+/g, '');
     return logJson;
   }
 }
