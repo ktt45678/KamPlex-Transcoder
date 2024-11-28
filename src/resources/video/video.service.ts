@@ -460,12 +460,12 @@ export class VideoService {
     return {};
   }
 
-  addToCanceled(job: Job<IJobData>) {
-    if (job.data.id)
-      this.CanceledJobIds.push(job.data.id);
-    else if (job.data.ids)
-      this.CanceledJobIds.push(...job.data.ids);
-    return job.data;
+  addToCanceled(jobData: IJobData) {
+    if (jobData.id)
+      this.CanceledJobIds.push(jobData.id);
+    else if (jobData.ids)
+      this.CanceledJobIds.push(...jobData.ids);
+    return jobData;
   }
 
   setRetryEncoding() {
@@ -717,9 +717,10 @@ export class VideoService {
             if (e === RejectCode.RETRY_ENCODING) {
               this.logger.info('Retrying encoding (user input)');
               continue;
-            } else if (e.code === 139) {
+            } else if ([9, 139].includes(e.code)) {
               // Handle Segmentation fault error
-              this.logger.info('Received error 139 from FFmpeg, retrying...');
+              this.logger.info(`Received error ${e.code} from FFmpeg, retrying...`);
+              await new Promise(r => setTimeout(r, 30_000));
               continue;
             }
             throw e;
@@ -744,8 +745,9 @@ export class VideoService {
             if (e === RejectCode.RETRY_ENCODING) {
               this.logger.info('Retrying encoding (user input)');
               continue;
-            } else if (e.code === 139) {
-              this.logger.info('Received error 139 from FFmpeg, retrying...');
+            } else if ([9, 139].includes(e.code)) {
+              this.logger.info(`Received error ${e.code} from FFmpeg, retrying...`);
+              await new Promise(r => setTimeout(r, 30_000));
               continue;
             }
             throw e;
@@ -848,7 +850,7 @@ export class VideoService {
     if (this.UseURLInput) {
       args.push(
         '-reconnect', '1',
-        '-reconnect_on_http_error', '400,401,403,408,409,5xx',
+        '-reconnect_on_http_error', '400,401,403,408,409,429,5xx',
       );
     }
     if (bitrate > 0) {
@@ -898,7 +900,7 @@ export class VideoService {
     if (this.UseURLInput) {
       args.push(
         '-reconnect', '1',
-        '-reconnect_on_http_error', '400,401,403,408,409,5xx',
+        '-reconnect_on_http_error', '400,401,403,408,409,429,5xx',
       );
     }
     splitFrom && args.push('-ss', splitFrom);
@@ -949,7 +951,7 @@ export class VideoService {
       if (this.UseURLInput) {
         args.push(
           '-reconnect', '1',
-          '-reconnect_on_http_error', '400,401,403,408,409,5xx',
+          '-reconnect_on_http_error', '400,401,403,408,409,429,5xx',
         );
       }
       splitFrom && args.push('-ss', splitFrom);
@@ -991,7 +993,7 @@ export class VideoService {
     if (this.UseURLInput) {
       args.push(
         '-reconnect', '1',
-        '-reconnect_on_http_error', '400,401,403,408,409,5xx',
+        '-reconnect_on_http_error', '400,401,403,408,409,429,5xx',
       );
     }
     splitFrom && args.push('-ss', splitFrom);
