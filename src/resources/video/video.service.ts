@@ -1183,8 +1183,7 @@ export class VideoService {
 
       const retryEncodingChecker = this.createRetryEncodingChecker(() => {
         isRetryEncoding = true;
-        ffmpeg.stdin.write('q');
-        ffmpeg.stdin.end();
+        ffmpeg.kill('SIGINT');
       });
 
       ffmpeg.on('exit', (code: number) => {
