@@ -360,7 +360,8 @@ export class RcloneHelper {
         .replace(new RegExp('\r|\n|\t', 'g'), ' ')
         .replace(/ +(?= )/g, '')
         .replace(/Checking: Transferring: .+/g, '')
-        .replace(/Transferring: .+/g, '');
+        .replace(/Transferring: .+/g, '')
+        .replace(/Deleted: .+/g, '');
     return logJson;
   }
 }
