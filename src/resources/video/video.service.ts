@@ -332,7 +332,7 @@ export class VideoService {
     try {
       let remuxFileName: string | null = null;
       // Only remux when enable SplitEncoding, UseURLInput, source is not mp4 or mkv
-      if (this.SplitEncoding && this.UseURLInput && !['.mp4', '.mkv'].includes(parsedInput.ext)) {
+      if (this.SplitEncoding && this.UseURLInput && !['.mkv'].includes(parsedInput.ext)) {
         await this.transcoderApiService.checkAndWaitForTranscoderPriority();
         this.logger.info(`Remuxing file: ${inputFile}`);
         remuxFileName = `${parsedInput.name}_remux_${codec}.mkv`;
@@ -398,7 +398,8 @@ export class VideoService {
           ffmpegDir,
           useURLInput: this.UseURLInput,
           jobId: job.id,
-          canceledJobIds: this.CanceledJobIds
+          canceledJobIds: this.CanceledJobIds,
+          logger: this.logger
         }, [
           { tw: 160, th: 160, pageCols: 10, pageRows: 10, prefix: 'M', format: 'jpeg' },
           { tw: 320, th: 320, pageCols: 5, pageRows: 5, prefix: 'L', format: 'jpeg' }
@@ -717,8 +718,11 @@ export class VideoService {
             if (e === RejectCode.RETRY_ENCODING) {
               this.logger.info('Retrying encoding (user input)');
               continue;
-            } else if ([9, 139].includes(e.code)) {
-              // Handle Segmentation fault error
+            } else if (e === RejectCode.ENCODING_TIMEOUT) {
+              this.logger.info('Retrying encoding (timed out)');
+              continue;
+            } else if (e.code) {
+              // Handle encoding error
               this.logger.info(`Received error ${e.code} from FFmpeg, retrying...`);
               await new Promise(r => setTimeout(r, 30_000));
               continue;
@@ -745,7 +749,10 @@ export class VideoService {
             if (e === RejectCode.RETRY_ENCODING) {
               this.logger.info('Retrying encoding (user input)');
               continue;
-            } else if ([9, 139].includes(e.code)) {
+            } else if (e === RejectCode.ENCODING_TIMEOUT) {
+              this.logger.info('Retrying encoding (timed out)');
+              continue;
+            } else if (e.code) {
               this.logger.info(`Received error ${e.code} from FFmpeg, retrying...`);
               await new Promise(r => setTimeout(r, 30_000));
               continue;
@@ -1159,12 +1166,14 @@ export class VideoService {
     return new Promise<void>((resolve, reject) => {
       let isCancelled = false;
       let isRetryEncoding = false;
+      let isProgressTimeout = false;
 
       this.logger.info('ffmpeg ' + args.join(' '));
       const ffmpeg = child_process.spawn(`"${this.configService.get<string>('FFMPEG_DIR')}/ffmpeg"`, args, { shell: true });
 
       ffmpeg.stdout.setEncoding('utf8');
       ffmpeg.stdout.on('data', async (data: string) => {
+        isProgressTimeout = false;
         const progress = ffmpegHelper.parseProgress(data);
         const percent = ffmpegHelper.progressPercent(progress.outTimeMs, videoDuration * 1000000);
         stdout.write(`${ffmpegHelper.getProgressMessage(progress, percent)}\r`);
@@ -1183,17 +1192,28 @@ export class VideoService {
 
       const retryEncodingChecker = this.createRetryEncodingChecker(() => {
         isRetryEncoding = true;
-        ffmpeg.kill('SIGINT');
+        ffmpeg.kill('SIGKILL');
+      });
+
+      const progressTimeoutChecker = this.createTimeoutChecker(() => {
+        if (isProgressTimeout) {
+          ffmpeg.kill('SIGKILL');
+          return;
+        }
+        isProgressTimeout = true;
       });
 
       ffmpeg.on('exit', (code: number) => {
         stdout.write('\n');
         clearInterval(cancelledJobChecker);
         clearInterval(retryEncodingChecker);
+        clearInterval(progressTimeoutChecker);
         if (isCancelled) {
           reject(RejectCode.JOB_CANCEL);
         } else if (isRetryEncoding) {
           reject(RejectCode.RETRY_ENCODING)
+        } else if (isProgressTimeout) {
+          reject(RejectCode.ENCODING_TIMEOUT)
         } else if (code !== 0) {
           reject({ code, message: `FFmpeg exited with status code: ${code}` });
         } else {
@@ -1283,6 +1303,12 @@ export class VideoService {
       if (!this.RetryEncoding) return;
       this.RetryEncoding = false;
       // Exec callback
+      exec();
+    }, ms)
+  }
+
+  private createTimeoutChecker(exec: () => void, ms: number = 300_000) {
+    return setInterval(() => {
       exec();
     }, ms)
   }

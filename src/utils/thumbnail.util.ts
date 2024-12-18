@@ -3,6 +3,7 @@ import { rimraf } from 'rimraf';
 import { mkdirp } from 'mkdirp';
 import { stdout } from 'process';
 import { Duration } from 'luxon';
+import { Logger } from 'winston';
 import sharp from 'sharp';
 import path from 'path';
 import fs from 'fs';
@@ -36,6 +37,8 @@ interface InputOptions {
   jobId: string | number;
 
   canceledJobIds: (string | number)[];
+
+  logger?: Logger;
 }
 
 interface GeneratorOptions {
@@ -134,7 +137,25 @@ export async function generateSprites(options: InputOptions, generatorOptionsLis
   //if (doLogging) console.log(`Predicting ${predicted} frames`);
   //console.log(`Predicting ${predicted} frames`);
 
-  let frameCount = await generateThumbnails(sourceFile, tempPath, maxWidth, maxHeight, options);
+  let frameCount = 0;
+
+  while (true) {
+    try {
+      frameCount = await generateThumbnails(sourceFile, tempPath, maxWidth, maxHeight, options);
+      break;
+    } catch (e) {
+      if (e === RejectCode.ENCODING_TIMEOUT) {
+        options.logger?.info('Retrying encoding (timed out)');
+        continue;
+      } else if (e.code) {
+        // Handle encoding error
+        options.logger?.info(`Received error ${e.code} from FFmpeg, retrying...`);
+        await new Promise(r => setTimeout(r, 30_000));
+        continue;
+      }
+      throw e;
+    }
+  }
 
   //console.log(`Generated: ${f.length} frames.`);
 
@@ -294,6 +315,7 @@ export async function generateSprites(options: InputOptions, generatorOptionsLis
 function generateThumbnails(inputFile: string, outputFolder: string, maxWidth: number, maxHeight: number, input: InputOptions) {
   return new Promise<number>((resolve, reject) => {
     let isCancelled = false;
+    let isProgressTimeout = false;
 
     // Thumbnail filter
     const videoFilters = [
@@ -352,11 +374,22 @@ function generateThumbnails(inputFile: string, outputFolder: string, maxWidth: n
       ffmpeg.stdin.end();
     }, 5000);
 
+    const progressTimeoutChecker = setInterval(() => {
+      if (isProgressTimeout) {
+        ffmpeg.kill('SIGKILL');
+        return;
+      }
+      isProgressTimeout = true;
+    }, 300_000);
+
     ffmpeg.on('exit', (code: number) => {
       stdout.write('\n');
       clearInterval(cancelledJobChecker);
+      clearInterval(progressTimeoutChecker);
       if (isCancelled) {
         reject(RejectCode.JOB_CANCEL);
+      } else if (isProgressTimeout) {
+        reject(RejectCode.ENCODING_TIMEOUT);
       } else if (code !== 0) {
         reject({ code, message: `FFmpeg exited with status code: ${code}` });
       } else {
