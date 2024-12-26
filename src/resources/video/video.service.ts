@@ -23,8 +23,9 @@ import { KamplexApiService } from '../../common/modules/kamplex-api';
 import { TranscoderApiService } from '../../common/modules/transcoder-api';
 import {
   createSnowFlakeId, diskSpaceUtil, ffmpegHelper, fileHelper, generateSprites, mediaInfoHelper, MediaInfoResult,
-  StringCrypto, stringHelper, StreamManifest, rcloneHelper, videoSourceHelper
+  StringCrypto, stringHelper, StreamManifest, rcloneHelper, videoSourceHelper, isEqualShallow
 } from '../../utils';
+import { Progress } from '../../common/entities';
 
 type JobNameType = 'update-source' | 'add-stream-video' | 'add-stream-audio' | 'add-stream-manifest' | 'finished-encoding' |
   'cancelled-encoding' | 'retry-encoding' | 'failed-encoding';
@@ -1167,14 +1168,16 @@ export class VideoService {
       let isCancelled = false;
       let isRetryEncoding = false;
       let isProgressTimeout = false;
+      let lastProgress: Progress | null = null;
 
       this.logger.info('ffmpeg ' + args.join(' '));
       const ffmpeg = child_process.spawn(`"${this.configService.get<string>('FFMPEG_DIR')}/ffmpeg"`, args, { shell: true });
 
       ffmpeg.stdout.setEncoding('utf8');
       ffmpeg.stdout.on('data', async (data: string) => {
-        isProgressTimeout = false;
         const progress = ffmpegHelper.parseProgress(data);
+        isProgressTimeout = isEqualShallow(lastProgress, progress);
+        lastProgress = { ...progress };
         const percent = ffmpegHelper.progressPercent(progress.outTimeMs, videoDuration * 1000000);
         stdout.write(`${ffmpegHelper.getProgressMessage(progress, percent)}\r`);
       });
@@ -1192,12 +1195,14 @@ export class VideoService {
 
       const retryEncodingChecker = this.createRetryEncodingChecker(() => {
         isRetryEncoding = true;
-        ffmpeg.kill('SIGKILL');
+        ffmpeg.kill('SIGINT');
+        ffmpeg.kill('SIGTERM');
       });
 
       const progressTimeoutChecker = this.createTimeoutChecker(() => {
         if (isProgressTimeout) {
-          ffmpeg.kill('SIGKILL');
+          ffmpeg.kill('SIGINT');
+          ffmpeg.kill('SIGTERM');
           return;
         }
         isProgressTimeout = true;
@@ -1307,7 +1312,7 @@ export class VideoService {
     }, ms)
   }
 
-  private createTimeoutChecker(exec: () => void, ms: number = 300_000) {
+  private createTimeoutChecker(exec: () => void, ms: number = 600_000) {
     return setInterval(() => {
       exec();
     }, ms)

@@ -13,6 +13,8 @@ import { ffmpegHelper } from './ffmpeg-helper.util';
 import { RejectCode } from '../enums/reject-code.enum';
 import { fileHelper } from './file-helper.util';
 import { rgbaToThumbHash } from './thumbhash.util';
+import { Progress } from '../common/entities';
+import { isEqualShallow } from './object-helper.util';
 
 type OutputImageFormat = 'webp' | 'jpeg' | 'avif';
 
@@ -316,6 +318,7 @@ function generateThumbnails(inputFile: string, outputFolder: string, maxWidth: n
   return new Promise<number>((resolve, reject) => {
     let isCancelled = false;
     let isProgressTimeout = false;
+    let lastProgress: Progress | null = null;
 
     // Thumbnail filter
     const videoFilters = [
@@ -354,6 +357,8 @@ function generateThumbnails(inputFile: string, outputFolder: string, maxWidth: n
     ffmpeg.stdout.setEncoding('utf8');
     ffmpeg.stdout.on('data', async (data: string) => {
       const progress = ffmpegHelper.parseProgress(data);
+      isProgressTimeout = isEqualShallow(lastProgress, progress);
+      lastProgress = { ...progress };
       generatedFrames = progress.frame || 0;
       const percent = ffmpegHelper.progressPercent(progress.outTimeMs, input.duration * 1000000);
       stdout.write(`${ffmpegHelper.getProgressMessage(progress, percent)}\r`);
@@ -376,11 +381,12 @@ function generateThumbnails(inputFile: string, outputFolder: string, maxWidth: n
 
     const progressTimeoutChecker = setInterval(() => {
       if (isProgressTimeout) {
-        ffmpeg.kill('SIGKILL');
+        ffmpeg.kill('SIGINT');
+        ffmpeg.kill('SIGTERM');
         return;
       }
       isProgressTimeout = true;
-    }, 300_000);
+    }, 600_000);
 
     ffmpeg.on('exit', (code: number) => {
       stdout.write('\n');

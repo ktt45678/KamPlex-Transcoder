@@ -3,6 +3,7 @@ export * from './ffmpeg-helper.util';
 export * from './file-helper.util';
 export * from './mediainfo.util';
 export * from './mongoose-helper.util';
+export * from './object-helper.util';
 export * from './rclone.util';
 export * from './snowflake-id.util';
 export * from './stream-manifest.util';
