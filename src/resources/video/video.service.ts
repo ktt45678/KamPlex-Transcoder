@@ -1176,7 +1176,8 @@ export class VideoService {
       ffmpeg.stdout.setEncoding('utf8');
       ffmpeg.stdout.on('data', async (data: string) => {
         const progress = ffmpegHelper.parseProgress(data);
-        isProgressTimeout = isEqualShallow(lastProgress, progress);
+        if(!isEqualShallow(lastProgress, progress))
+          isProgressTimeout = false;
         lastProgress = { ...progress };
         const percent = ffmpegHelper.progressPercent(progress.outTimeMs, videoDuration * 1000000);
         stdout.write(`${ffmpegHelper.getProgressMessage(progress, percent)}\r`);
