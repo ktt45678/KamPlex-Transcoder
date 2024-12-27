@@ -358,7 +358,7 @@ function generateThumbnails(inputFile: string, outputFolder: string, maxWidth: n
     ffmpeg.stdout.on('data', async (data: string) => {
       const progress = ffmpegHelper.parseProgress(data);
       if(!isEqualShallow(lastProgress, progress))
-        is
+        isProgressTimeout = false;
       lastProgress = { ...progress };
       generatedFrames = progress.frame || 0;
       const percent = ffmpegHelper.progressPercent(progress.outTimeMs, input.duration * 1000000);
