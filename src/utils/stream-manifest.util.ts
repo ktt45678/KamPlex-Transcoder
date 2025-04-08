@@ -141,6 +141,17 @@ export class StreamManifest {
     this.manifest = { ...value };
   }
 
+  clearTracks(type?: 'audio' | 'video') {
+    if (type === 'audio')
+      this.manifest.audioTracks = [];
+    else if (type === 'video')
+      this.manifest.videoTracks = [];
+    else {
+      this.manifest.audioTracks = [];
+      this.manifest.videoTracks = [];
+    }
+  }
+
   saveFile(path: string) {
     const json = JSON.stringify(this.manifest);
     return fs.promises.writeFile(path, json, { encoding: 'utf8' });

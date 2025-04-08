@@ -22,8 +22,8 @@ import { HlsManifest, RcloneFile } from '../../common/interfaces';
 import { KamplexApiService } from '../../common/modules/kamplex-api';
 import { TranscoderApiService } from '../../common/modules/transcoder-api';
 import {
-  createSnowFlakeId, diskSpaceUtil, ffmpegHelper, fileHelper, generateSprites, mediaInfoHelper, MediaInfoResult,
-  StringCrypto, stringHelper, StreamManifest, rcloneHelper, videoSourceHelper, isEqualShallow
+  createSnowFlakeId, diskSpaceUtil, ffmpegHelper, fileHelper, generateSprites, hdrMetadataHelper, mediaInfoHelper,
+  MediaInfoResult, StringCrypto, stringHelper, StreamManifest, rcloneHelper, videoSourceHelper, isEqualShallow
 } from '../../utils';
 import { Progress } from '../../common/entities';
 
@@ -260,13 +260,19 @@ export class VideoService {
     });
 
     const manifest = new StreamManifest();
-    // const existingManifestData = await this.findExistingManifest(job.data.storage, job.data._id, codec);
-    // if (existingManifestData !== null)
-    //   manifest.load(existingManifestData);
+    // Load manifest if encode audio or video only
+    if (job.data.advancedOptions?.audioOnly || job.data.advancedOptions?.videoOnly) {
+      const existingManifestData = await this.findExistingManifest(job.data.storage, job.data._id, codec);
+      if (existingManifestData !== null) {
+        manifest.load(existingManifestData);
+        job.data.advancedOptions?.audioOnly && manifest.clearTracks('audio');
+        job.data.advancedOptions?.videoOnly && manifest.clearTracks('video');
+      }
+    }
 
     // Skip audio encoding for other codecs
     // Only encode if there's no audio track inside the manifest data
-    if (codec === VideoCodec.H264 /*&& manifest.manifest.audioTracks.length === 0*/) {
+    if (codec === VideoCodec.H264 && !job.data.advancedOptions.videoOnly /*&& manifest.manifest.audioTracks.length === 0*/) {
       this.logger.info('Processing audio');
       const defaultAudioTrack = audioTracks.find(a => a.disposition.default) || audioTracks[0];
       const allowedAudioTracks = new Set(job.data.advancedOptions?.selectAudioTracks || []);
@@ -314,6 +320,10 @@ export class VideoService {
             audioAACParams: extraAACParams, audioOpusParams: extraOpusParams, isDefault: false, downmix: false, manifest, job
           });
         }
+        // Save and update manifest file when encoding audio only
+        if (job.data.advancedOptions?.audioOnly) {
+          await this.saveManifestFile(manifest, parsedInput.dir, codec, job);
+        }
         // Delete the downloaded source file after the audio is processed, continue using URL
         if (this.UseURLInput)
           await fileHelper.deleteFile(inputFile);
@@ -330,85 +340,89 @@ export class VideoService {
       }
     }
 
+    let remuxFileName: string | null = null;
     try {
-      let remuxFileName: string | null = null;
-      // Only remux when enable SplitEncoding, UseURLInput, source is not mp4 or mkv
-      if (this.SplitEncoding && this.UseURLInput && !['.mkv'].includes(parsedInput.ext)) {
-        await this.transcoderApiService.checkAndWaitForTranscoderPriority();
-        this.logger.info(`Remuxing file: ${inputFile}`);
-        remuxFileName = `${parsedInput.name}_remux_${codec}.mkv`;
-        const remuxFilePath = `${parsedInput.dir}/${remuxFileName}`;
-        const remuxUrlFolder = `${job.data.storage}:${job.data._id}`;
-        const remuxUrlPath = `/${job.data._id}/${remuxFileName}`;
-        await videoSourceHelper.remuxSourceMKV(linkedInputUrl, remuxFilePath, {
-          ffmpegDir: ffmpegDir,
-          duration: videoDuration,
-          videoOnly: true,
-          //audioCodec: (videoInfo.format.format_name === 'mpegts' ||
-          // audioTracks[0].codec_name === 'pcm_bluray') ? 'pcm_s24le' : 'copy',
-          useURLInput: this.UseURLInput,
-          jobId: job.id,
-          canceledJobIds: this.CanceledJobIds,
-          logFn: (message) => { this.logger.info(message) }
-        });
-        const moveRemuxFileArgs = this.createRcloneMoveArgs(remuxFilePath, remuxUrlFolder);
-        await this.uploadMedia(moveRemuxFileArgs, job.id);
-        linkedInputUrl = streamStorage.publicUrl.replace(':path', remuxUrlPath);
-      }
-      // Video info
-      const isHDRVideo = mediaInfoHelper.isHDRVideo(videoTrack.color_space, videoTrack.color_transfer, videoTrack.color_primaries);
-      const sourceInfo: VideoSourceInfo = {
-        duration: videoDuration, fps: videoFps, bitrate: videoBitrate, codec: videoCodec, sourceH264Params: videoSourceH264Params,
-        width: srcWidth, height: srcHeight, language: mediaInfo.originalLang, isHDR: isHDRVideo
-      };
-      if (codec === VideoCodec.H264) {
-        this.logger.info('Video codec: H264');
-        await this.encodeByCodec({
-          inputFile, parsedInput, inputFileUrl: linkedInputUrl, sourceInfo, qualityList: availableQualityList, encodingSettings,
-          advancedSettings: job.data.advancedOptions, codec: VideoCodec.H264, videoParams: videoH264Params, manifest, job
-        });
-      } else if (codec === VideoCodec.H265) {
-        this.logger.info('Video codec: H265');
-        await this.encodeByCodec({
-          inputFile, parsedInput, inputFileUrl: linkedInputUrl, sourceInfo, qualityList: availableQualityList, encodingSettings,
-          advancedSettings: job.data.advancedOptions, codec: VideoCodec.H265, videoParams: videoH265Params, manifest, job
-        });
-      } else if (codec === VideoCodec.VP9) {
-        this.logger.info('Video codec: VP9');
-        await this.encodeByCodec({
-          inputFile, parsedInput, inputFileUrl: linkedInputUrl, sourceInfo, qualityList: availableQualityList, encodingSettings,
-          advancedSettings: job.data.advancedOptions, codec: VideoCodec.VP9, videoParams: videoVP9Params, manifest, job
-        });
-      } else if (codec === VideoCodec.AV1) {
-        this.logger.info('Video codec: AV1');
-        await this.encodeByCodec({
-          inputFile, parsedInput, inputFileUrl: linkedInputUrl, sourceInfo, qualityList: availableQualityList, encodingSettings,
-          advancedSettings: job.data.advancedOptions, codec: VideoCodec.AV1, videoParams: videoAV1Params, manifest, job
-        });
-      }
+      if (!job.data.advancedOptions?.audioOnly) {
+        // Only remux when enable SplitEncoding, UseURLInput, source is not mp4 or mkv
+        if (this.SplitEncoding && this.UseURLInput && !['.mkv'].includes(parsedInput.ext)) {
+          await this.transcoderApiService.checkAndWaitForTranscoderPriority();
+          this.logger.info(`Remuxing file: ${inputFile}`);
+          remuxFileName = `${parsedInput.name}_remux_${codec}.mkv`;
+          const remuxFilePath = `${parsedInput.dir}/${remuxFileName}`;
+          const remuxUrlFolder = `${job.data.storage}:${job.data._id}`;
+          const remuxUrlPath = `/${job.data._id}/${remuxFileName}`;
+          await videoSourceHelper.remuxSourceMKV(linkedInputUrl, remuxFilePath, {
+            ffmpegDir: ffmpegDir,
+            duration: videoDuration,
+            videoOnly: true,
+            //audioCodec: (videoInfo.format.format_name === 'mpegts' ||
+            // audioTracks[0].codec_name === 'pcm_bluray') ? 'pcm_s24le' : 'copy',
+            useURLInput: this.UseURLInput,
+            jobId: job.id,
+            canceledJobIds: this.CanceledJobIds,
+            logFn: (message) => { this.logger.info(message) }
+          });
+          const moveRemuxFileArgs = this.createRcloneMoveArgs(remuxFilePath, remuxUrlFolder);
+          await this.uploadMedia(moveRemuxFileArgs, job.id);
+          linkedInputUrl = streamStorage.publicUrl.replace(':path', remuxUrlPath);
+        }
+        // Video info
+        const isHDRVideo = mediaInfoHelper.isHDRVideo(videoTrack.color_space, videoTrack.color_transfer, videoTrack.color_primaries);
+        const hdrParams = isHDRVideo && codec !== VideoCodec.H264 ?
+          await hdrMetadataHelper.getHdrMetadata(linkedInputUrl || inputFile, 0, ffmpegDir, this.logger) : null;
+        const sourceInfo: VideoSourceInfo = {
+          duration: videoDuration, fps: videoFps, bitrate: videoBitrate, codec: videoCodec, sourceH264Params: videoSourceH264Params,
+          width: srcWidth, height: srcHeight, language: mediaInfo.originalLang, isHDR: isHDRVideo, hdrParams: hdrParams
+        };
+        if (codec === VideoCodec.H264) {
+          this.logger.info('Video codec: H264');
+          await this.encodeByCodec({
+            inputFile, parsedInput, inputFileUrl: linkedInputUrl, sourceInfo, qualityList: availableQualityList, encodingSettings,
+            advancedSettings: job.data.advancedOptions, codec: VideoCodec.H264, videoParams: videoH264Params, manifest, job
+          });
+        } else if (codec === VideoCodec.H265) {
+          this.logger.info('Video codec: H265');
+          await this.encodeByCodec({
+            inputFile, parsedInput, inputFileUrl: linkedInputUrl, sourceInfo, qualityList: availableQualityList, encodingSettings,
+            advancedSettings: job.data.advancedOptions, codec: VideoCodec.H265, videoParams: videoH265Params, manifest, job
+          });
+        } else if (codec === VideoCodec.VP9) {
+          this.logger.info('Video codec: VP9');
+          await this.encodeByCodec({
+            inputFile, parsedInput, inputFileUrl: linkedInputUrl, sourceInfo, qualityList: availableQualityList, encodingSettings,
+            advancedSettings: job.data.advancedOptions, codec: VideoCodec.VP9, videoParams: videoVP9Params, manifest, job
+          });
+        } else if (codec === VideoCodec.AV1) {
+          this.logger.info('Video codec: AV1');
+          await this.encodeByCodec({
+            inputFile, parsedInput, inputFileUrl: linkedInputUrl, sourceInfo, qualityList: availableQualityList, encodingSettings,
+            advancedSettings: job.data.advancedOptions, codec: VideoCodec.AV1, videoParams: videoAV1Params, manifest, job
+          });
+        }
 
-      if (codec === VideoCodec.H264) {
-        // Generate preview thumbnail
-        this.logger.info(`Generating preview thumbnail: ${inputFile}`);
-        this.setTranscoderPriority(1);
-        await generateSprites({
-          source: linkedInputUrl || inputFile,
-          output: `${parsedInput.dir}/${this.thumbnailFolder}`,
-          duration: videoDuration,
-          isHDR: isHDRVideo,
-          ffmpegDir,
-          useURLInput: this.UseURLInput,
-          jobId: job.id,
-          canceledJobIds: this.CanceledJobIds,
-          logger: this.logger
-        }, [
-          { tw: 160, th: 160, pageCols: 10, pageRows: 10, prefix: 'M', format: 'jpeg' },
-          { tw: 320, th: 320, pageCols: 5, pageRows: 5, prefix: 'L', format: 'jpeg' }
-        ]);
-        this.setTranscoderPriority(0);
-        const syncThumbnails = !!job.data.update;
-        const rcloneMoveThumbArgs = this.createRcloneMoveThumbArgs(transcodeDir, job.data.storage, job.data._id, syncThumbnails);
-        await this.uploadMedia(rcloneMoveThumbArgs, job.id);
+        if (codec === VideoCodec.H264) {
+          // Generate preview thumbnail
+          this.logger.info(`Generating preview thumbnail: ${inputFile}`);
+          this.setTranscoderPriority(1);
+          await generateSprites({
+            source: linkedInputUrl || inputFile,
+            output: `${parsedInput.dir}/${this.thumbnailFolder}`,
+            duration: videoDuration,
+            isHDR: isHDRVideo,
+            ffmpegDir,
+            useURLInput: this.UseURLInput,
+            jobId: job.id,
+            canceledJobIds: this.CanceledJobIds,
+            logger: this.logger
+          }, [
+            { tw: 160, th: 160, pageCols: 10, pageRows: 10, prefix: 'M', format: 'jpeg' },
+            { tw: 320, th: 320, pageCols: 5, pageRows: 5, prefix: 'L', format: 'jpeg' }
+          ]);
+          this.setTranscoderPriority(0);
+          const syncThumbnails = !!job.data.update;
+          const rcloneMoveThumbArgs = this.createRcloneMoveThumbArgs(transcodeDir, job.data.storage, job.data._id, syncThumbnails);
+          await this.uploadMedia(rcloneMoveThumbArgs, job.id);
+        }
       }
 
       if (job.data.replaceStreams?.length) {
@@ -420,20 +434,15 @@ export class VideoService {
             }))
         }
       }
-      // Remove remux file if exist
-      if (remuxFileName) {
-        this.logger.info(`Removing remux file: ${remuxFileName}`);
-        await rcloneHelper.deleteFile(rcloneConfigFile, rcloneDir, job.data.storage, `${job.data._id}/${remuxFileName}`, (args => {
-          this.logger.info('rclone ' + args.join(' '));
-        }));
-      }
       // Check uploaded files
       this.logger.info('Checking uploaded files');
       const checkFilesExclusion = `${this.thumbnailFolder}/**`;
       let uploadedFiles = await this.findUploadedFiles(job.data.storage, job.data._id, job.id, checkFilesExclusion);
       let listAttempt = 1;
       // 1 source file (0 for linked source), 3 audio files, and video files
-      const totalExpectedFiles = availableQualityList.length + (job.data.linkedStorage ? 0 : 1) + 3;
+      const expectedVideoFiles = !job.data.advancedOptions?.audioOnly ? availableQualityList.length : 0;
+      const expectedAudioFiles = !job.data.advancedOptions?.videoOnly ? 3 : 0;
+      const totalExpectedFiles = expectedVideoFiles + (job.data.linkedStorage ? 0 : 1) + expectedAudioFiles;
       const maxTries = 5;
       while (uploadedFiles.length < totalExpectedFiles && listAttempt < maxTries) {
         uploadedFiles = await this.findUploadedFiles(job.data.storage, job.data._id, job.id, checkFilesExclusion);
@@ -454,6 +463,13 @@ export class VideoService {
     } finally {
       this.logger.info('Cleaning up');
       await fileHelper.deleteFolder(transcodeDir);
+      // Remove remux file if exist
+      if (remuxFileName) {
+        this.logger.info(`Removing remux file: ${remuxFileName}`);
+        await rcloneHelper.deleteFile(rcloneConfigFile, rcloneDir, job.data.storage, `${job.data._id}/${remuxFileName}`, (args => {
+          this.logger.info('rclone ' + args.join(' '));
+        }));
+      }
       this.setTranscoderPriority(0);
       this.logger.info('Completed');
     }
@@ -898,7 +914,11 @@ export class VideoService {
       splitFrom, splitDuration, segmentIndex } = options;
     const gopSize = (sourceInfo.fps ? sourceInfo.fps * 2 : 48).toString();
     const bitDepth = codec === VideoCodec.H264 ? 8 : 10;
-    const videoFilters = this.resolveVideoFilters({ quality, hdrTonemap: sourceInfo.isHDR, bitDepth });
+    const videoFilters = this.resolveVideoFilters({
+      quality,
+      hdrTonemap: codec === VideoCodec.H264 && sourceInfo.isHDR,
+      bitDepth
+    });
     const args: string[] = [
       '-hide_banner', '-y',
       '-hwaccel', 'auto',
@@ -1086,6 +1106,10 @@ export class VideoService {
     const svtAV1Params = ['tune=0', 'enable-overlays=1', 'film-grain=0', 'film-grain-denoise=0', 'frame-luma-bias=30', 'scd=1'];
     if (advancedSettings.h264Tune !== 'animation')
       svtAV1Params.push('scm=0');
+    if (sourceInfo.hdrParams) {
+      args.push(...sourceInfo.hdrParams.ffmpegParams);
+      svtAV1Params.push(sourceInfo.hdrParams.libsvtav1Params);
+    }
     const gopSize = (sourceInfo.fps ? sourceInfo.fps * 2 : 48).toString();
     svtAV1Params.push(`keyint=${gopSize}`);
     args.push('-svtav1-params', `"${svtAV1Params.join(':')}"`);
@@ -1176,7 +1200,7 @@ export class VideoService {
       ffmpeg.stdout.setEncoding('utf8');
       ffmpeg.stdout.on('data', async (data: string) => {
         const progress = ffmpegHelper.parseProgress(data);
-        if(!isEqualShallow(lastProgress, progress))
+        if (!isEqualShallow(lastProgress, progress))
           isProgressTimeout = false;
         lastProgress = { ...progress };
         const percent = ffmpegHelper.progressPercent(progress.outTimeMs, videoDuration * 1000000);
@@ -1456,7 +1480,7 @@ export class VideoService {
       availableQualityList = await this.findAvailableQuality(alreadyEncodedFiles, allQualityList, parsedInput, codec,
         job.data.replaceStreams, job);
       this.logger.info(`Available quality: ${availableQualityList.length ? availableQualityList.join(', ') : 'None'}`);
-      if (!availableQualityList.length) {
+      if (!availableQualityList.length && !job.data.advancedOptions?.audioOnly) {
         this.logger.info('Everything is already encoded, no need to continue');
         await this.kamplexApiService.ensureProducerAppIsOnline(job.data.producerUrl);
         await this.videoResultQueue.add('cancelled-encoding', { ...job.data, jobId: job.id, keepStreams: true });

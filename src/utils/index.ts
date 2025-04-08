@@ -1,6 +1,7 @@
 export * from './disk-space.util';
 export * from './ffmpeg-helper.util';
 export * from './file-helper.util';
+export * from './hdr-metadata.util';
 export * from './mediainfo.util';
 export * from './mongoose-helper.util';
 export * from './object-helper.util';

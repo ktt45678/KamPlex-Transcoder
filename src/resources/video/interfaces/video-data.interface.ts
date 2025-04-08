@@ -39,5 +39,9 @@ export interface IAdvancedOptions {
   extraAudioTracks?: number[];
   forceVideoQuality?: number[];
   h264Tune?: string;
+  queuePriority?: number;
+  audioOnly?: boolean;
+  videoOnly?: boolean;
+  videoCodecs?: number;
   overrideSettings?: IEncodingSetting[];
 }

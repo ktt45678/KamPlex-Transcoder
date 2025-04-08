@@ -3,6 +3,7 @@ import { Job } from 'bullmq';
 
 import { IEncodingSetting, IVideoData } from './video-data.interface';
 import { StreamManifest } from '../../../utils';
+import { ParsedHDRMetadataResult } from '../../../utils/hdr-metadata.util';
 
 export interface EncodeVideoOptions {
   inputFile: string;
@@ -43,6 +44,7 @@ export interface VideoSourceInfo {
   language: string | null;
   isHDR: boolean;
   sourceH264Params: string;
+  hdrParams: ParsedHDRMetadataResult | null;
 }
 
 export interface AdvancedVideoSettings {
