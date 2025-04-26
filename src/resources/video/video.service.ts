@@ -272,7 +272,7 @@ export class VideoService {
 
     // Skip audio encoding for other codecs
     // Only encode if there's no audio track inside the manifest data
-    if (codec === VideoCodec.H264 && !job.data.advancedOptions.videoOnly /*&& manifest.manifest.audioTracks.length === 0*/) {
+    if (codec === VideoCodec.H264 && !job.data.advancedOptions?.videoOnly /*&& manifest.manifest.audioTracks.length === 0*/) {
       this.logger.info('Processing audio');
       const defaultAudioTrack = audioTracks.find(a => a.disposition.default) || audioTracks[0];
       const allowedAudioTracks = new Set(job.data.advancedOptions?.selectAudioTracks || []);
@@ -525,25 +525,28 @@ export class VideoService {
   private async encodeAudio(options: EncodeAudioOptions) {
     const { inputFile, parsedInput, inputFileUrl, sourceInfo, audioTrackIndex, codec, isDefault, downmix, audioParams, manifest, job } = options;
     const streamId = await createSnowFlakeId();
-    const audioArgs = this.createAudioEncodingArgs({
-      inputFile: inputFileUrl || inputFile, parsedInput, audioParams, codec, channels: sourceInfo.channels,
-      downmix, audioIndex: audioTrackIndex
-    });
+
     const audioBaseName = `${parsedInput.name}_audio_${audioTrackIndex}`;
-    const audioFileName = `${audioBaseName}.mp4`;
+    const encodedAudioFileName = `${audioBaseName}.mp4`;
+    const preparedAudioFileName = `${audioBaseName}.mp4`;
     const manifestFileName = `${audioBaseName}.m3u8`;
     const mpdManifestFileName = `${audioBaseName}.mpd`;
     const playlistFileName = `${audioBaseName}_1.m3u8`;
 
+    const audioArgs = this.createAudioEncodingArgs({
+      inputFile: inputFileUrl || inputFile, parsedInput, audioParams, codec, channels: sourceInfo.channels,
+      downmix, audioIndex: audioTrackIndex, outputFileName: encodedAudioFileName
+    });
+
     this.setTranscoderPriority(1);
     await this.encodeMedia(audioArgs, sourceInfo.duration, job.id);
-    await this.prepareMediaFile(audioFileName, parsedInput, `${audioBaseName}_temp`, manifestFileName, job);
+    await this.prepareMediaFile(encodedAudioFileName, preparedAudioFileName, parsedInput, `${audioBaseName}_temp`, manifestFileName, job);
     this.setTranscoderPriority(0);
 
-    this.logger.info(`Reading audio data: ${audioFileName}, ${mpdManifestFileName}, ${playlistFileName} and ${manifestFileName}`);
-    const audioInfo = await FFprobe(`${parsedInput.dir}/${audioFileName}`, { path: `${this.configService.get<string>('FFMPEG_DIR')}/ffprobe` });
+    this.logger.info(`Reading audio data: ${preparedAudioFileName}, ${mpdManifestFileName}, ${playlistFileName} and ${manifestFileName}`);
+    const audioInfo = await FFprobe(`${parsedInput.dir}/${preparedAudioFileName}`, { path: `${this.configService.get<string>('FFMPEG_DIR')}/ffprobe` });
     const audioTrack = audioInfo.streams.find(s => s.codec_type === 'audio');
-    const audioMIInfo = await mediaInfoHelper.getMediaInfo(`${parsedInput.dir}/${audioFileName}`,
+    const audioMIInfo = await mediaInfoHelper.getMediaInfo(`${parsedInput.dir}/${preparedAudioFileName}`,
       this.configService.get<string>('MEDIAINFO_DIR'));
     const audioMITrack = audioMIInfo.media.track.find(s => s['@type'] === 'Audio');
     if (!audioTrack || !audioMITrack)
@@ -559,10 +562,10 @@ export class VideoService {
       channels: +audioMITrack.Channels || audioTrack.channels || 2,
       samplingRate: +audioMITrack.SamplingRate || +audioTrack.sample_rate || 0,
       codec: codec,
-      uri: `${streamId}/${audioFileName}`
+      uri: `${streamId}/${preparedAudioFileName}`
     });
 
-    const rcloneMoveArgs = this.createRcloneMoveArgs(`${parsedInput.dir}/${audioFileName}`,
+    const rcloneMoveArgs = this.createRcloneMoveArgs(`${parsedInput.dir}/${preparedAudioFileName}`,
       `${job.data.storage}:${job.data._id}/${streamId}`);
     await this.uploadMedia(rcloneMoveArgs, job.id);
 
@@ -573,7 +576,7 @@ export class VideoService {
       progress: {
         sourceId: job.data._id,
         streamId: streamId,
-        fileName: audioFileName,
+        fileName: preparedAudioFileName,
         codec: codec,
         channels: +audioMITrack.Channels || audioTrack.channels || 2,
       }
@@ -598,7 +601,8 @@ export class VideoService {
       const streamId = await createSnowFlakeId();
       const perQualitySettings = encodingSettings.find(s => s.quality === qualityList[i]);
       const videoBaseName = `${parsedInput.name}_${qualityList[i]}`;
-      const videoFileName = `${videoBaseName}.mp4`;
+      const encodedVideoFileName = codec === VideoCodec.AV1 && sourceInfo.isHDR ? `${videoBaseName}.mkv` : `${videoBaseName}.mp4`;
+      const preparedVideoFileName = `${videoBaseName}.mp4`;
       const manifestFileName = `${videoBaseName}.m3u8`;
       const mpdManifestFileName = `${videoBaseName}.mpd`;
       const playlistFileName = `${videoBaseName}_1.m3u8`;
@@ -609,19 +613,21 @@ export class VideoService {
             const crfKey = codec === VideoCodec.AV1 ? 'cq' : 'crf';
             const videoArgs = this.createVideoEncodingArgs({
               inputFile: inputFileUrl || inputFile, parsedInput, codec, quality: qualityList[i], videoParams,
-              sourceInfo, crfKey, advancedSettings, encodingSetting: perQualitySettings
+              sourceInfo, crfKey, advancedSettings, encodingSetting: perQualitySettings, outputFileName: encodedVideoFileName
             });
             await this.encodeMedia(videoArgs, sourceInfo.duration, job.id);
           } else {
             // Pass 1 params
             const videoPass1Args = this.createTwoPassesVideoEncodingArgs({
               inputFile: inputFileUrl || inputFile, parsedInput, codec, quality: qualityList[i], videoParams,
-              sourceInfo, crfKey: 'cq', advancedSettings, encodingSetting: perQualitySettings, pass: 1
+              sourceInfo, crfKey: 'cq', advancedSettings, encodingSetting: perQualitySettings, pass: 1,
+              outputFileName: encodedVideoFileName
             });
             // Pass 2 params
             const videoPass2Args = this.createTwoPassesVideoEncodingArgs({
               inputFile: inputFileUrl || inputFile, parsedInput, codec, quality: qualityList[i], videoParams,
-              sourceInfo, crfKey: 'cq', advancedSettings, encodingSetting: perQualitySettings, pass: 2
+              sourceInfo, crfKey: 'cq', advancedSettings, encodingSetting: perQualitySettings, pass: 2,
+              outputFileName: encodedVideoFileName
             });
 
             await this.encodeMedia(videoPass1Args, sourceInfo.duration, job.id);
@@ -630,15 +636,15 @@ export class VideoService {
           this.setTranscoderPriority(0);
         } else {
           const segmentDuration = +this.configService.get('SPLIT_SEGMENT_DURATION') || 30;
-          await this.splitAndEncodeVideo(options, qualityList[i], perQualitySettings, segmentDuration);
+          await this.splitAndEncodeVideo(options, qualityList[i], perQualitySettings, segmentDuration, encodedVideoFileName);
         }
 
         this.setTranscoderPriority(1);
-        await this.prepareMediaFile(videoFileName, parsedInput, `${videoBaseName}_temp`, manifestFileName, job);
+        await this.prepareMediaFile(encodedVideoFileName, preparedVideoFileName, parsedInput, `${videoBaseName}_temp`, manifestFileName, job);
         this.setTranscoderPriority(0);
 
-        this.logger.info(`Reading video data: ${videoFileName}, ${mpdManifestFileName}, ${playlistFileName} and ${manifestFileName}`);
-        const videoMIInfo = await mediaInfoHelper.getMediaInfo(`${parsedInput.dir}/${videoFileName}`,
+        this.logger.info(`Reading video data: ${preparedVideoFileName}, ${mpdManifestFileName}, ${playlistFileName} and ${manifestFileName}`);
+        const videoMIInfo = await mediaInfoHelper.getMediaInfo(`${parsedInput.dir}/${preparedVideoFileName}`,
           this.configService.get<string>('MEDIAINFO_DIR'));
         const generalMITrack = videoMIInfo.media.track.find(s => s['@type'] === 'General');
         const videoMITrack = videoMIInfo.media.track.find(s => s['@type'] === 'Video');
@@ -654,15 +660,15 @@ export class VideoService {
           language: sourceInfo.language || videoMITrack.Language,
           frameRate: +videoMITrack.FrameRate || +generalMITrack?.FrameRate,
           codec: codec,
-          uri: `${streamId}/${videoFileName}`
+          uri: `${streamId}/${preparedVideoFileName}`
         });
 
-        const rcloneMoveArgs = this.createRcloneMoveArgs(`${parsedInput.dir}/${videoFileName}`,
+        const rcloneMoveArgs = this.createRcloneMoveArgs(`${parsedInput.dir}/${preparedVideoFileName}`,
           `${job.data.storage}:${job.data._id}/${streamId}`);
         await this.uploadMedia(rcloneMoveArgs, job.id);
 
         // Save and upload manifest file
-        await this.saveManifestFile(manifest, parsedInput.dir, codec, job);
+        await this.saveManifestFile(manifest, parsedInput.dir, codec, job, sourceInfo);
       } catch (e) {
         const rcloneDir = this.configService.get<string>('RCLONE_DIR');
         const rcloneConfig = this.configService.get<string>('RCLONE_CONFIG_FILE');
@@ -687,15 +693,16 @@ export class VideoService {
         progress: {
           sourceId: job.data._id,
           streamId: streamId,
-          fileName: videoFileName,
+          fileName: preparedVideoFileName,
           codec: codec,
           quality: qualityList[i],
+          hdrFormat: sourceInfo.hdrParams?.hdrFormat
         }
       });
     }
   }
 
-  private async splitAndEncodeVideo(options: EncodeVideoOptions, quality: number, perQualitySettings: IEncodingSetting, segmentDuration: number = 30) {
+  private async splitAndEncodeVideo(options: EncodeVideoOptions, quality: number, perQualitySettings: IEncodingSetting, segmentDuration: number = 30, outputFileName: string) {
     const { inputFile, parsedInput, inputFileUrl, sourceInfo, advancedSettings = {}, codec, videoParams, job } = options;
     const segmentFolder = `${parsedInput.dir}/${SPLIT_SEGMENT_FOLDER}`;
     const concatSegmentFile = `${segmentFolder}/${CONCAT_SEGMENT_FILE}`;
@@ -717,6 +724,10 @@ export class VideoService {
       //     i = Math.ceil(i * totalSegments / oldTotalSegments);
       //   this.logger.info(`New segment duration: ${segmentDuration}, total segments: ${totalSegments}, segment: ${i + 1}`);
       // };
+      // Output mkv for dynamic HDR retention when muxing with mp4box, otherwise use mp4 due to H264 compability
+      const segmentFileName = codec === VideoCodec.AV1 && sourceInfo.isHDR ? `${quality}_${i}.mkv` : `${quality}_${i}.mp4`;
+      const segmentFileSubPath = `${SPLIT_SEGMENT_FOLDER}/${segmentFileName}`;
+      // Wait until the primary transcoder is not busy
       while (true) {
         await this.transcoderApiService.checkAndWaitForTranscoderPriority();
         const startTime = i * segmentDuration;
@@ -727,7 +738,7 @@ export class VideoService {
           const videoArgs = this.createVideoEncodingArgs({
             inputFile: inputFileUrl || inputFile, parsedInput, codec, quality, videoParams,
             sourceInfo, crfKey, advancedSettings, encodingSetting: perQualitySettings, splitFrom: startTime.toString(),
-            splitDuration: segmentDuration.toString(), segmentIndex: i
+            splitDuration: segmentDuration.toString(), segmentIndex: i, outputFileName: segmentFileSubPath
           });
           try {
             await this.encodeMedia(videoArgs, segmentDuration, job.id);
@@ -751,13 +762,13 @@ export class VideoService {
           const videoPass1Args = this.createTwoPassesVideoEncodingArgs({
             inputFile: inputFileUrl || inputFile, parsedInput, codec, quality, videoParams,
             sourceInfo, crfKey: 'cq', advancedSettings, encodingSetting: perQualitySettings, pass: 1, splitFrom: startTime.toString(),
-            splitDuration: segmentDuration.toString(), segmentIndex: i
+            splitDuration: segmentDuration.toString(), segmentIndex: i, outputFileName: segmentFileSubPath
           });
           // Pass 2 params
           const videoPass2Args = this.createTwoPassesVideoEncodingArgs({
             inputFile: inputFileUrl || inputFile, parsedInput, codec, quality, videoParams,
             sourceInfo, crfKey: 'cq', advancedSettings, encodingSetting: perQualitySettings, pass: 2, splitFrom: startTime.toString(),
-            splitDuration: segmentDuration.toString(), segmentIndex: i
+            splitDuration: segmentDuration.toString(), segmentIndex: i, outputFileName: segmentFileSubPath
           });
           try {
             await this.encodeMedia(videoPass1Args, segmentDuration, job.id);
@@ -781,11 +792,11 @@ export class VideoService {
         break;
       }
 
-      await fileHelper.appendToFile(concatSegmentFile, `file '${quality}_${i}.mp4'\n`);
+      await fileHelper.appendToFile(concatSegmentFile, `file ${segmentFileName}\n`);
     }
 
     // Merge back
-    const concatSegmentArgs = this.createConcatSegmentArgs(concatSegmentFile, parsedInput, `${parsedInput.name}_${quality}`);
+    const concatSegmentArgs = this.createConcatSegmentArgs(concatSegmentFile, parsedInput, outputFileName);
     await this.encodeMedia(concatSegmentArgs, sourceInfo.duration, job.id);
     this.setTranscoderPriority(0);
 
@@ -807,12 +818,13 @@ export class VideoService {
     });
   }
 
-  private async prepareMediaFile(inputFileName: string, parsedInput: path.ParsedPath, tempFileName: string, playlistName: string,
-    job: Job<IVideoData>) {
+  private async prepareMediaFile(inputFileName: string, outputFileName: string, parsedInput: path.ParsedPath, tempFileName: string,
+    playlistName: string, job: Job<IVideoData>) {
     this.logger.info(`Preparing media file: ${inputFileName}`);
     // Trim saved file name
     const trimmedFileName = job.data.linkedStorage ? stringHelper.trimSlugFilename(job.data.filename) : job.data.filename;
     const inputFilePath = `${parsedInput.dir}/${inputFileName}`;
+    const outputFilePath = `${parsedInput.dir}/${outputFileName}`;
     const inputSourceFile = `${parsedInput.dir}/${trimmedFileName}`;
     const hasFreeSpace = await diskSpaceUtil.hasFreeSpaceToCopyFile(inputFilePath, parsedInput.dir);
     if (!hasFreeSpace) {
@@ -823,7 +835,7 @@ export class VideoService {
     await this.packageMedia(mp4boxPackArgs, job.id);
     await fileHelper.deleteFile(inputFilePath);
     const tempFilePath = `${parsedInput.dir}/${tempFileName}.mp4`;
-    await fileHelper.renameFile(tempFilePath, inputFilePath);
+    await fileHelper.renameFile(tempFilePath, outputFilePath);
     if (!hasFreeSpace) {
       this.logger.info(`Redownloading: ${job.data.filename}`);
       const rcloneDir = this.configService.get<string>('RCLONE_DIR');
@@ -841,7 +853,7 @@ export class VideoService {
     }
   }
 
-  private async saveManifestFile(manifest: StreamManifest, transcodeDir: string, codec: number, job: Job<IVideoData>) {
+  private async saveManifestFile(manifest: StreamManifest, transcodeDir: string, codec: number, job: Job<IVideoData>, sourceInfo?: VideoSourceInfo) {
     const manifestFileName = `manifest_${codec}.json`;
     const manifestFilePath = `${transcodeDir}/${manifestFileName}`;
     const streamId = await createSnowFlakeId();
@@ -856,13 +868,14 @@ export class VideoService {
         sourceId: job.data._id,
         streamId: streamId,
         fileName: manifestFileName,
-        codec: codec
+        codec: codec,
+        hdrFormat: sourceInfo?.hdrParams?.hdrFormat
       }
     });
   }
 
   private createAudioEncodingArgs(options: CreateAudioEncodingArgsOptions) {
-    const { inputFile, parsedInput, audioParams, codec, channels, downmix, audioIndex } = options;
+    const { inputFile, parsedInput, audioParams, codec, channels, downmix, audioIndex, outputFileName } = options;
     const bitrate = AudioCodec.OPUS === codec ? 128 : AudioCodec.OPUS_SURROUND === codec ? 64 * channels : 0;
     const args: string[] = [
       '-hide_banner', '-y',
@@ -904,14 +917,14 @@ export class VideoService {
       //'-map_metadata', '-1',
       '-map_chapters', '-1',
       '-f', 'mp4',
-      `"${parsedInput.dir}/${parsedInput.name}_audio_${audioIndex}.mp4"`
+      `"${parsedInput.dir}/${outputFileName}"`
     );
     return args;
   }
 
   private createVideoEncodingArgs(options: CreateVideoEncodingArgsOptions) {
     const { inputFile, parsedInput, codec, quality, videoParams, sourceInfo, crfKey, advancedSettings, encodingSetting,
-      splitFrom, splitDuration, segmentIndex } = options;
+      splitFrom, splitDuration, outputFileName } = options;
     const gopSize = (sourceInfo.fps ? sourceInfo.fps * 2 : 48).toString();
     const bitDepth = codec === VideoCodec.H264 ? 8 : 10;
     const videoFilters = this.resolveVideoFilters({
@@ -952,19 +965,14 @@ export class VideoService {
       '-map_chapters', '-1',
       '-vf', videoFilters,
       //'-movflags', '+faststart',
-      '-f', 'mp4',
+      `"${parsedInput.dir}/${outputFileName}"`
     );
-    if (segmentIndex != null) {
-      args.push(`"${parsedInput.dir}/${SPLIT_SEGMENT_FOLDER}/${quality}_${segmentIndex}.mp4"`);
-    } else {
-      args.push(`"${parsedInput.dir}/${parsedInput.name}_${quality}.mp4"`);
-    }
     return args;
   }
 
   private createTwoPassesVideoEncodingArgs(options: CreateVideoEncodingArgsOptions & { pass: number }) {
     const { inputFile, parsedInput, codec, quality, videoParams, sourceInfo, crfKey, advancedSettings, encodingSetting, pass,
-      splitFrom, splitDuration, segmentIndex } = options;
+      splitFrom, splitDuration, segmentIndex, outputFileName } = options;
     const gopSize = (sourceInfo.fps ? sourceInfo.fps * 2 : 48).toString();
     const bitDepth = codec === VideoCodec.H264 ? 8 : 10;
     const videoFilters = this.resolveVideoFilters({ quality, hdrTonemap: false, bitDepth });
@@ -1053,13 +1061,8 @@ export class VideoService {
     }
     args.push(
       '-pass', '2',
-      '-f', 'mp4'
+      `"${parsedInput.dir}/${outputFileName}"`
     );
-    if (segmentIndex != null) {
-      args.push(`"${parsedInput.dir}/${SPLIT_SEGMENT_FOLDER}/${quality}_${segmentIndex}.mp4"`);
-    } else {
-      args.push(`"${parsedInput.dir}/${parsedInput.name}_${quality}.mp4"`);
-    }
     return args;
   }
 
@@ -1103,12 +1106,22 @@ export class VideoService {
   }
 
   private resolveSVTAV1Params(args: string[], advancedSettings: AdvancedVideoSettings, sourceInfo: VideoSourceInfo) {
-    const svtAV1Params = ['tune=0', 'enable-overlays=1', 'film-grain=0', 'film-grain-denoise=0', 'frame-luma-bias=30', 'scd=1'];
+    const svtAv1Preset = this.configService.get<string>('SVT_AV1_PRESET');
+    const svtAV1PresetParams = {
+      main: [
+        'tune=0', 'enable-overlays=1', 'film-grain=0', 'film-grain-denoise=0', 'scd=1', 'sharpness=0', 'enable-qm=1', 'qm-min=0',
+        'enable-variance-boost=1',
+      ],
+      psy: ['tune=0', 'enable-overlays=1', 'film-grain=0', 'film-grain-denoise=0', 'sharpness=0', 'scd=1']
+    };
+    const svtAV1Params = svtAv1Preset === 'psy' ? svtAV1PresetParams.psy : svtAV1PresetParams.main;
     if (advancedSettings.h264Tune !== 'animation')
       svtAV1Params.push('scm=0');
     if (sourceInfo.hdrParams) {
       args.push(...sourceInfo.hdrParams.ffmpegParams);
       svtAV1Params.push(sourceInfo.hdrParams.libsvtav1Params);
+    } else {
+      svtAV1Params.push('luminance-qp-bias=30');
     }
     const gopSize = (sourceInfo.fps ? sourceInfo.fps * 2 : 48).toString();
     svtAV1Params.push(`keyint=${gopSize}`);
@@ -1131,7 +1144,7 @@ export class VideoService {
     return videoFilters.join(',');
   }
 
-  private createConcatSegmentArgs(inputFile: string, parsedInput: path.ParsedPath, outputName: string) {
+  private createConcatSegmentArgs(inputFile: string, parsedInput: path.ParsedPath, outputFile: string) {
     const args = [
       '-hide_banner', '-y',
       '-progress', 'pipe:1',
@@ -1140,7 +1153,7 @@ export class VideoService {
       '-safe', '0',
       '-i', `"${inputFile}"`,
       '-c', 'copy',
-      `"${parsedInput.dir}/${outputName}.mp4"`
+      `"${parsedInput.dir}/${outputFile}"`
     ];
     return args;
   }

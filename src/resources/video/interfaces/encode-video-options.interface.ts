@@ -32,6 +32,7 @@ export interface CreateVideoEncodingArgsOptions {
   splitFrom?: string;
   splitDuration?: string;
   segmentIndex?: number;
+  outputFileName: string;
 }
 
 export interface VideoSourceInfo {

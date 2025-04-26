@@ -1,6 +1,7 @@
 import { Logger } from 'winston';
 import child_process from 'child_process';
-import { stdout } from 'process';
+
+import { HDRFormat } from '../enums';
 
 const x265ValidColorMatrix: string[] = [
   'gbr', 'bt709', 'unknown', 'reserved', 'fcc', 'bt470bg', 'smpte170m', 'smpte240m', 'ycgco',
@@ -80,6 +81,7 @@ export interface ParsedHDRMetadataResult {
   x265Params: string;
   libsvtav1Params: string;
   libaomav1Params: string;
+  hdrFormat: number;
 }
 
 class MdItem {
@@ -263,13 +265,19 @@ export class HDRMetadataHelper {
     let x265Params: string = colorData.toX265Params();
     const libaomAv1Params: string = colorData.toLibaomAv1Params();
     let libsvtav1Params: string = colorData.toLibsvtav1Params();
+    let ffmpegParams: string = colorData.toFfmpegOptions();
+    const ffmpegParamsArray: string[] = colorData.toFfmpegOptionsArray();
+    let hdrFormat: number | null = null;
 
+    let doviFFmpegParamAdded: boolean = false;
     const sideDataList = frameData['side_data_list'];
     for (const sideData of sideDataList) {
       if (sideData['side_data_type'] === 'Mastering display metadata') {
         const masteringDisplayData = new MasteringDisplayData(sideData);
         x265Params += ':' + masteringDisplayData.toX265Params();
         libsvtav1Params += ':' + masteringDisplayData.toLibsvtav1Params();
+        if (!(hdrFormat & HDRFormat.HDR10))
+          hdrFormat = hdrFormat | HDRFormat.HDR10;
         logger?.debug('Mastering display metadata:');
         logger?.debug(masteringDisplayData.toString());
 
@@ -277,21 +285,36 @@ export class HDRMetadataHelper {
         const contentLightLevelData = new ContentLightLevelData(sideData);
         x265Params += ':' + contentLightLevelData.toX265Params();
         libsvtav1Params += ':' + contentLightLevelData.toLibsvtav1Params();
+        if (!(hdrFormat & HDRFormat.HDR10))
+          hdrFormat = hdrFormat | HDRFormat.HDR10;
         logger?.debug('Content light level metadata:');
         logger?.debug(contentLightLevelData.toString());
+      } else if (['HDR Dynamic Metadata SMPTE2094-40 (HDR10+)', 'Dolby Vision RPU Data', 'Dolby Vision Metadata'].includes(sideData['side_data_type'])) {
+        if (!doviFFmpegParamAdded) {
+          ffmpegParamsArray.push('-dolbyvision', '1');
+          ffmpegParams += ' ' + '-dolbyvision 1';
+          doviFFmpegParamAdded = true;
+        }
+        if (sideData['side_data_type'] === 'HDR Dynamic Metadata SMPTE2094-40 (HDR10+)') {
+          if (!(hdrFormat & HDRFormat.HDR10_PLUS))
+            hdrFormat = hdrFormat | HDRFormat.HDR10_PLUS;
+        } else if (!(hdrFormat & HDRFormat.DOLBY_VISION))
+          hdrFormat = hdrFormat | HDRFormat.DOLBY_VISION;
       }
     }
 
-    logger?.debug(`FFmpeg options: ${colorData.toFfmpegOptions()}`);
+    logger?.debug(`FFmpeg options: ${ffmpegParams}`);
     logger?.debug(`x265 params: ${x265Params}`);
     logger?.debug(`libsvtav1 params: ${libsvtav1Params}`);
     logger?.debug(`libaom-av1 params: ${libaomAv1Params}`);
+    logger?.debug(`hdr format: ${hdrFormat}`);
 
     const result: ParsedHDRMetadataResult = {
-      ffmpegParams: colorData.toFfmpegOptionsArray(),
+      ffmpegParams: ffmpegParamsArray,
       x265Params: x265Params,
       libsvtav1Params: libsvtav1Params,
-      libaomav1Params: libaomAv1Params
+      libaomav1Params: libaomAv1Params,
+      hdrFormat: hdrFormat
     };
 
     return result;

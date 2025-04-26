@@ -43,5 +43,7 @@ export interface MediaQueueProgress {
 
   quality?: number;
 
+  hdrFormat?: number;
+
   channels?: number;
 }

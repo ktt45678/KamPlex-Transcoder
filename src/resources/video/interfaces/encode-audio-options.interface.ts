@@ -42,6 +42,7 @@ export interface CreateAudioEncodingArgsOptions {
   channels: number;
   downmix: boolean;
   audioIndex: number;
+  outputFileName: string;
 }
 
 export interface AudioSourceInfo {
