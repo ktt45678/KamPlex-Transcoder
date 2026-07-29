@@ -2,7 +2,7 @@ import { Schema, model } from 'mongoose';
 
 import { IMediaStorageStream, mediaStorageStreamSchema } from './media-storage-stream.model';
 
-interface IMediaStorage {
+export interface IMediaStorage {
   _id: bigint;
   type: number;
   name: string;

@@ -1,6 +1,6 @@
 import { Schema, model } from 'mongoose';
 
-interface IMedia {
+export interface IMedia {
   _id: bigint;
   type: string;
   originalLang: string;

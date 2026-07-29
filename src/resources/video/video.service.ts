@@ -1,4 +1,5 @@
-import { Inject, Injectable } from '@nestjs/common';
+import { Inject, Injectable, OnModuleInit } from '@nestjs/common';
+import { EventEmitter } from 'events';
 import { ConfigService } from '@nestjs/config';
 import { Cron } from '@nestjs/schedule';
 import { InjectQueue } from '@nestjs/bullmq';
@@ -11,19 +12,21 @@ import FFprobe from 'ffprobe-client';
 import { WINSTON_MODULE_PROVIDER } from 'nest-winston';
 import { Logger } from 'winston';
 
-import { externalStorageModel } from '../../models/external-storage.model';
+import { externalStorageModel, IExternalStorage } from '../../models/external-storage.model';
 import { mediaStorageModel } from '../../models/media-storage.model';
 import { settingModel } from '../../models/setting.model';
 import { mediaModel } from '../../models/media.model';
 import { IVideoData, IJobData, IStorage, IEncodingSetting, MediaQueueResult, EncodeAudioOptions, EncodeVideoOptions, VideoSourceInfo, CreateAudioEncodingArgsOptions, CreateVideoEncodingArgsOptions, EncodeAudioByTrackOptions, AdvancedVideoSettings, ResolveVideoFiltersOptions, ValidateSourceQualityOptions } from './interfaces';
-import { AudioCodec, StatusCode, VideoCodec, RejectCode, TaskQueue } from '../../enums';
-import { ENCODING_QUALITY, AUDIO_PARAMS, AUDIO_SURROUND_PARAMS, VIDEO_H264_PARAMS, VIDEO_H265_PARAMS, VIDEO_VP9_PARAMS, VIDEO_AV1_PARAMS, AUDIO_SPEED_PARAMS, AUDIO_SURROUND_OPUS_PARAMS, NEXT_GEN_ENCODING_QUALITY, SPLIT_SEGMENT_FOLDER, CONCAT_SEGMENT_FILE } from '../../config';
+import { AudioCodec, StatusCode, VideoCodec, RejectCode, TaskQueue, HDRTonemap } from '../../enums';
+import { ENCODING_QUALITY, AUDIO_PARAMS, AUDIO_SURROUND_PARAMS, VIDEO_H264_PARAMS, VIDEO_H265_PARAMS, VIDEO_VP9_PARAMS, VIDEO_AV1_PARAMS, AUDIO_SPEED_PARAMS, AUDIO_SURROUND_OPUS_PARAMS, NEXT_GEN_ENCODING_QUALITY, SPLIT_SEGMENT_FOLDER, CONCAT_SEGMENT_FILE, CANCELED_JOBS_FILE, VIDEO_INPUT_PARAMS } from '../../config';
 import { HlsManifest, RcloneFile } from '../../common/interfaces';
 import { KamplexApiService } from '../../common/modules/kamplex-api';
 import { TranscoderApiService } from '../../common/modules/transcoder-api';
 import {
   createSnowFlakeId, diskSpaceUtil, ffmpegHelper, fileHelper, generateSprites, hdrMetadataHelper, mediaInfoHelper,
-  MediaInfoResult, StringCrypto, stringHelper, StreamManifest, rcloneHelper, videoSourceHelper, isEqualShallow
+  MediaInfoResult, StringCrypto, stringHelper, StreamManifest, rcloneHelper, videoSourceHelper, isEqualShallow,
+  HDRTransfer, hdrTonemapFilters, libplaceboTonemapFilters, ParsedHDRMetadataResult,
+  LIBPLACEBO_HW_DEVICE_ARGS
 } from '../../utils';
 import { Progress } from '../../common/entities';
 
@@ -31,7 +34,7 @@ type JobNameType = 'update-source' | 'add-stream-video' | 'add-stream-audio' | '
   'cancelled-encoding' | 'retry-encoding' | 'failed-encoding';
 
 @Injectable()
-export class VideoService {
+export class VideoService implements OnModuleInit {
   private AudioParams: string[];
   private AudioSpeedParams: string[];
   private AudioSurroundParams: string[];
@@ -40,9 +43,13 @@ export class VideoService {
   private VideoH265Params: string[];
   private VideoVP9Params: string[];
   private VideoAV1Params: string[];
+  private VideoInputParams: string[];
+  private UseLibplacebo: boolean;
   private UseURLInput: boolean;
   private SplitEncoding: boolean;
-  private CanceledJobIds: (string | number)[];
+  private cancelEmitter = new EventEmitter();
+  private CanceledJobIds = new Set<string>();
+  private canceledJobsFilePath: string;
   private RetryEncoding: boolean;
   private CanRetryEncoding: boolean;
   private TranscoderPriority: number;
@@ -68,19 +75,40 @@ export class VideoService {
     this.VideoVP9Params = videoVP9Params ? videoVP9Params.split(' ') : VIDEO_VP9_PARAMS;
     const videoAV1Params = this.configService.get<string>('VIDEO_AV1_PARAMS');
     this.VideoAV1Params = videoAV1Params ? videoAV1Params.split(' ') : VIDEO_AV1_PARAMS;
+    const videoInputParams = this.configService.get<string>('VIDEO_INPUT_PARAMS');
+    this.VideoInputParams = videoInputParams !== undefined
+      ? (videoInputParams.trim() ? videoInputParams.trim().split(/\s+/) : [])
+      : VIDEO_INPUT_PARAMS;
+    this.UseLibplacebo = this.configService.get<string>('VIDEO_HDR_TONEMAP') === HDRTonemap.LIBPLACEBO;
     this.UseURLInput = this.configService.get<string>('USE_URL_INPUT') === 'true';
     this.SplitEncoding = this.configService.get<string>('SPLIT_ENCODING') === 'true';
-    this.CanceledJobIds = [];
+    const transcodeDir = this.configService.get<string>('TRANSCODE_DIR');
+    this.canceledJobsFilePath = `${transcodeDir}/${CANCELED_JOBS_FILE}`;
     this.RetryEncoding = false;
     this.CanRetryEncoding = false;
     this.TranscoderPriority = 0;
     this.thumbnailFolder = 'thumbnails';
   }
 
+  async onModuleInit() {
+    try {
+      const exists = await fileHelper.fileExists(this.canceledJobsFilePath);
+      if (exists) {
+        const data = await fileHelper.readAllText(this.canceledJobsFilePath, 'utf-8') as string;
+        const ids = JSON.parse(data);
+        if (Array.isArray(ids))
+          this.CanceledJobIds = new Set(ids);
+      }
+    } catch (e) {
+      this.logger.error(`Failed to load canceled jobs list: ${e.message}`);
+    }
+  }
+
   async transcode(job: Job<IVideoData>, codec: number = 1) {
-    const cancelIndex = this.CanceledJobIds.findIndex(j => +j === +job.id);
-    if (cancelIndex > -1) {
-      this.CanceledJobIds = this.CanceledJobIds.filter(id => +id > +job.id);
+    const jobIdStr = String(job.id);
+    if (this.CanceledJobIds.has(jobIdStr)) {
+      this.CanceledJobIds.delete(jobIdStr);
+      this.saveCanceledJobIds();
       this.logger.info(`Received cancel signal from job id: ${job.id}`);
       return {};
     }
@@ -89,7 +117,7 @@ export class VideoService {
     await mongoose.connect(this.configService.get<string>('DATABASE_URL'), { family: 4, useBigInt64: true });
     const appSettings = await settingModel.findOne({}).lean().exec();
     const mediaInfo = await mediaModel.findOne({ _id: BigInt(job.data.media) }, { _id: 1, originalLang: 1 }).lean().exec();
-    const streamStorage = await externalStorageModel.findOne({ _id: BigInt(job.data.storage) }, { _id: 1, publicUrl: 1 }).lean().exec();
+    const streamStorage = await externalStorageModel.findOne({ _id: BigInt(job.data.storage) }, { _id: 1, folderId: 1, publicUrl: 1 }).lean().exec();
 
     const audioParams = appSettings.audioParams ? appSettings.audioParams.split(' ') : this.AudioParams;
     const audioSpeedParams = appSettings.audioSpeedParams ? appSettings.audioSpeedParams.split(' ') : this.AudioSpeedParams;
@@ -117,7 +145,7 @@ export class VideoService {
     if (job.data.linkedStorage)
       await this.ensureRcloneConfigExist(rcloneConfigFile, job.data.linkedStorage, job);
 
-    let linkedInputUrl = this.UseURLInput ? await this.getLinkedSourceUrl(job) : null;
+    let linkedInputUrl = this.UseURLInput ? await this.getLinkedSourceUrl(job, job.data.linkedStorage || job.data.storage) : null;
 
     // Retry if the transcoder was interrupted before
     const retryFromInterruption = await fileHelper.fileExists(transcodeDir);
@@ -343,14 +371,14 @@ export class VideoService {
     let remuxFileName: string | null = null;
     try {
       if (!job.data.advancedOptions?.audioOnly) {
-        // Only remux when enable SplitEncoding, UseURLInput, source is not mp4 or mkv
+        // Only remux when enable SplitEncoding, UseURLInput, source is not mkv
         if (this.SplitEncoding && this.UseURLInput && !['.mkv'].includes(parsedInput.ext)) {
           await this.transcoderApiService.checkAndWaitForTranscoderPriority();
           this.logger.info(`Remuxing file: ${inputFile}`);
           remuxFileName = `${parsedInput.name}_remux_${codec}.mkv`;
           const remuxFilePath = `${parsedInput.dir}/${remuxFileName}`;
           const remuxUrlFolder = `${job.data.storage}:${job.data._id}`;
-          const remuxUrlPath = `/${job.data._id}/${remuxFileName}`;
+          //const remuxUrlPath = `/${job.data._id}/${remuxFileName}`;
           await videoSourceHelper.remuxSourceMKV(linkedInputUrl, remuxFilePath, {
             ffmpegDir: ffmpegDir,
             duration: videoDuration,
@@ -359,20 +387,29 @@ export class VideoService {
             // audioTracks[0].codec_name === 'pcm_bluray') ? 'pcm_s24le' : 'copy',
             useURLInput: this.UseURLInput,
             jobId: job.id,
-            canceledJobIds: this.CanceledJobIds,
+            onCancel: (stop) => this.createCancelJobChecker(job.id, stop),
             logFn: (message) => { this.logger.info(message) }
           });
           const moveRemuxFileArgs = this.createRcloneMoveArgs(remuxFilePath, remuxUrlFolder);
           await this.uploadMedia(moveRemuxFileArgs, job.id);
-          linkedInputUrl = streamStorage.publicUrl.replace(':service_path', 's3').replace(':path', remuxUrlPath);
+          linkedInputUrl = this.getLinkedSourceRemuxUrl(streamStorage, job.data._id, remuxFileName);
         }
         // Video info
-        const isHDRVideo = mediaInfoHelper.isHDRVideo(videoTrack.color_space, videoTrack.color_transfer, videoTrack.color_primaries);
-        const hdrParams = isHDRVideo && codec !== VideoCodec.H264 ?
-          await hdrMetadataHelper.getHdrMetadata(linkedInputUrl || inputFile, 0, ffmpegDir, this.logger) : null;
+        const hdrTransfer = mediaInfoHelper.getHDRTransfer(videoTrack.color_transfer);
+        const isHDRVideo = hdrTransfer !== HDRTransfer.SDR;
+        let hdrParams: ParsedHDRMetadataResult | null = null;
+        if (isHDRVideo) {
+          try {
+            hdrParams = await hdrMetadataHelper.getHdrMetadata(linkedInputUrl || inputFile, 0, ffmpegDir, this.logger);
+          } catch (e) {
+            const message = (<{ message?: string }>e)?.message || e.toString();
+            this.logger.warning(`Failed to read HDR metadata: ${message}`);
+          }
+        }
         const sourceInfo: VideoSourceInfo = {
           duration: videoDuration, fps: videoFps, bitrate: videoBitrate, codec: videoCodec, sourceH264Params: videoSourceH264Params,
-          width: srcWidth, height: srcHeight, language: mediaInfo.originalLang, isHDR: isHDRVideo, hdrParams: hdrParams
+          width: srcWidth, height: srcHeight, language: mediaInfo.originalLang, isHDR: isHDRVideo, hdrTransfer: hdrTransfer,
+          hdrParams: hdrParams
         };
         if (codec === VideoCodec.H264) {
           this.logger.info('Video codec: H264');
@@ -409,10 +446,15 @@ export class VideoService {
             output: `${parsedInput.dir}/${this.thumbnailFolder}`,
             duration: videoDuration,
             isHDR: isHDRVideo,
+            hdrSource: {
+              transfer: hdrTransfer,
+              maxCll: hdrParams?.maxCll,
+              masteringMaxLuminance: hdrParams?.masteringMaxLuminance
+            },
             ffmpegDir,
             useURLInput: this.UseURLInput,
             jobId: job.id,
-            canceledJobIds: this.CanceledJobIds,
+            onCancel: (stop) => this.createCancelJobChecker(job.id, stop),
             logger: this.logger
           }, [
             { tw: 160, th: 160, pageCols: 10, pageRows: 10, prefix: 'M', format: 'jpeg' },
@@ -479,11 +521,29 @@ export class VideoService {
   }
 
   addToCanceled(jobData: IJobData) {
-    if (jobData.id)
-      this.CanceledJobIds.push(jobData.id);
-    else if (jobData.ids)
-      this.CanceledJobIds.push(...jobData.ids);
+    const jobIds = jobData.id ? [jobData.id] : (jobData.ids || []);
+    const ids = Array.from(new Set(jobIds));
+    for (const id of ids) {
+      const strId = String(id);
+      if (!this.CanceledJobIds.has(strId)) {
+        this.CanceledJobIds.add(strId);
+        if (this.CanceledJobIds.size > 1000) {
+          const firstItem = this.CanceledJobIds.values().next().value;
+          if (firstItem) this.CanceledJobIds.delete(firstItem);
+        }
+      }
+      this.cancelEmitter.emit(`cancel-${strId}`);
+    }
+    this.saveCanceledJobIds();
     return jobData;
+  }
+
+  private async saveCanceledJobIds() {
+    try {
+      await fileHelper.writeAllText(this.canceledJobsFilePath, JSON.stringify(Array.from(this.CanceledJobIds)), 'utf-8');
+    } catch (e) {
+      this.logger.error(`Failed to save canceled jobs list: ${e.message}`)
+    }
   }
 
   setRetryEncoding() {
@@ -928,14 +988,19 @@ export class VideoService {
       splitFrom, splitDuration, outputFileName } = options;
     const gopSize = (sourceInfo.fps ? sourceInfo.fps * 2 : 48).toString();
     const bitDepth = codec === VideoCodec.H264 ? 8 : 10;
+    const hdrTonemap = codec === VideoCodec.H264 && sourceInfo.isHDR;
+    const useLibplacebo = hdrTonemap && this.UseLibplacebo;
     const videoFilters = this.resolveVideoFilters({
       quality,
-      hdrTonemap: codec === VideoCodec.H264 && sourceInfo.isHDR,
-      bitDepth
+      hdrTonemap,
+      bitDepth,
+      sourceInfo,
+      useLibplacebo
     });
     const args: string[] = [
       '-hide_banner', '-y',
-      '-hwaccel', 'auto',
+      ...(useLibplacebo ? LIBPLACEBO_HW_DEVICE_ARGS : []),
+      ...this.VideoInputParams,
       '-progress', 'pipe:1',
       '-loglevel', 'error'
     ];
@@ -976,12 +1041,12 @@ export class VideoService {
       splitFrom, splitDuration, segmentIndex, outputFileName } = options;
     const gopSize = (sourceInfo.fps ? sourceInfo.fps * 2 : 48).toString();
     const bitDepth = codec === VideoCodec.H264 ? 8 : 10;
-    const videoFilters = this.resolveVideoFilters({ quality, hdrTonemap: false, bitDepth });
+    const videoFilters = this.resolveVideoFilters({ quality, hdrTonemap: false, bitDepth, sourceInfo });
     if (pass === 1) {
       const outputName = process.platform === 'win32' ? 'NUL' : '/dev/null';
       const args = [
         '-hide_banner', '-y',
-        '-hwaccel', 'auto',
+        ...this.VideoInputParams,
         '-progress', 'pipe:1',
         '-loglevel', 'error'
       ];
@@ -1023,7 +1088,7 @@ export class VideoService {
     }
     const args = [
       '-hide_banner', '-y',
-      '-hwaccel', 'auto',
+      ...this.VideoInputParams,
       '-progress', 'pipe:1',
       '-loglevel', 'error'
     ];
@@ -1132,11 +1197,22 @@ export class VideoService {
 
   private resolveVideoFilters(options: ResolveVideoFiltersOptions) {
     const videoFilters: string[] = [];
-    if (options.quality) {
+    const useLibplacebo = options.hdrTonemap && options.useLibplacebo;
+
+    if (options.quality && !useLibplacebo) {
       videoFilters.push(`scale=-2:${options.quality}`);
     }
     if (options.hdrTonemap) {
-      videoFilters.push('zscale=t=linear:npl=100,format=gbrpf32le,tonemap=tonemap=mobius:desat=0,zscale=p=bt709:t=bt709:m=bt709:r=tv:d=error_diffusion');
+      const hdrParams = options.sourceInfo?.hdrParams;
+      if (useLibplacebo) {
+        videoFilters.push(...libplaceboTonemapFilters(options.quality));
+      } else {
+        videoFilters.push(...hdrTonemapFilters({
+          transfer: options.sourceInfo?.hdrTransfer ?? HDRTransfer.PQ,
+          maxCll: hdrParams?.maxCll,
+          masteringMaxLuminance: hdrParams?.masteringMaxLuminance
+        }));
+      }
       if (options.bitDepth === 10) {
         videoFilters.push('format=yuv420p10le');
       } else {
@@ -1250,7 +1326,7 @@ export class VideoService {
 
       ffmpeg.on('exit', (code: number) => {
         stdout.write('\n');
-        clearInterval(cancelledJobChecker);
+        cancelledJobChecker();
         clearInterval(retryEncodingChecker);
         clearInterval(progressTimeoutChecker);
         if (isCancelled) {
@@ -1287,7 +1363,7 @@ export class VideoService {
 
       mp4box.on('exit', (code: number) => {
         stdout.write('\n');
-        clearInterval(cancelledJobChecker);
+        cancelledJobChecker();
         if (isCancelled) {
           reject(RejectCode.JOB_CANCEL);
         } else if (code !== 0) {
@@ -1320,7 +1396,7 @@ export class VideoService {
 
       rclone.on('exit', (code: number) => {
         stdout.write('\n');
-        clearInterval(cancelledJobChecker);
+        cancelledJobChecker();
         if (isCancelled) {
           reject(RejectCode.JOB_CANCEL);
         } else if (code !== 0) {
@@ -1332,14 +1408,25 @@ export class VideoService {
     });
   }
 
-  private createCancelJobChecker(jobId: string | number, exec: () => void, ms: number = 5000) {
-    return setInterval(() => {
-      const index = this.CanceledJobIds.findIndex(j => +j === +jobId);
-      if (index === -1) return;
-      this.CanceledJobIds = this.CanceledJobIds.filter(id => +id > +jobId);
+  private createCancelJobChecker(jobId: string | number, exec: () => void) {
+    const jobIdStr = String(jobId);
+    if (this.CanceledJobIds.has(jobIdStr)) {
+      this.CanceledJobIds.delete(jobIdStr);
+      this.saveCanceledJobIds();
+      exec();
+      return () => { };
+    }
+    const listener = () => {
+      this.CanceledJobIds.delete(jobIdStr);
+      this.saveCanceledJobIds();
       // Exec callback
       exec();
-    }, ms)
+    };
+    const eventName = `cancel-${jobIdStr}`;
+    this.cancelEmitter.once(eventName, listener);
+    return () => {
+      this.cancelEmitter.off(eventName, listener);
+    };
   }
 
   private createRetryEncodingChecker(exec: () => void, ms: number = 5000) {
@@ -1388,10 +1475,10 @@ export class VideoService {
       const cancelledJobChecker = this.createCancelJobChecker(jobId, () => {
         isCancelled = true;
         rclone.kill('SIGINT');
-      }, 500);
+      });
 
       rclone.on('exit', (code: number) => {
-        clearInterval(cancelledJobChecker);
+        cancelledJobChecker();
         if (isCancelled) {
           reject(RejectCode.JOB_CANCEL);
         } else if (code === 3) {
@@ -1423,12 +1510,8 @@ export class VideoService {
     }
   }
 
-  private async getLinkedSourceUrl(job: Job<IVideoData>) {
-    let externalStorage;
-    if (job.data.linkedStorage)
-      externalStorage = await externalStorageModel.findOne({ _id: BigInt(job.data.linkedStorage) }, { publicUrl: 1, folderId: 1 }).lean().exec();
-    else
-      externalStorage = await externalStorageModel.findOne({ _id: BigInt(job.data.storage) }, { publicUrl: 1, folderId: 1 }).lean().exec();
+  private async getLinkedSourceUrl(job: Job<IVideoData>, storageId: string) {
+    const externalStorage = await externalStorageModel.findOne({ _id: BigInt(storageId) }, { publicUrl: 1, folderId: 1 }).lean().exec();
     if (!externalStorage) {
       const statusError = await this.generateStatusError(StatusCode.STORAGE_NOT_FOUND, job);
       throw new Error(statusError.errorCode);
@@ -1436,6 +1519,14 @@ export class VideoService {
     if (!externalStorage.publicUrl)
       return null;
     const sourcePathItems = [externalStorage.folderId || '', job.data.path, job.data.filename];
+    const sourcePath = path.posix.join(...sourcePathItems.map(value => encodeURIComponent(value)));
+    return externalStorage.publicUrl.replace(':service_path', 's3').replace(':path', sourcePath);
+  }
+
+  private getLinkedSourceRemuxUrl(externalStorage: mongoose.FlattenMaps<IExternalStorage>, remuxPath: string, filename: string) {
+    if (!externalStorage.publicUrl)
+      return null;
+    const sourcePathItems = [externalStorage.folderId || '', remuxPath, filename];
     const sourcePath = path.posix.join(...sourcePathItems.map(value => encodeURIComponent(value)));
     return externalStorage.publicUrl.replace(':service_path', 's3').replace(':path', sourcePath);
   }

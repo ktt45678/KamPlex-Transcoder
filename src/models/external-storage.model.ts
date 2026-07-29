@@ -1,6 +1,6 @@
 import { Schema, model } from 'mongoose';
 
-interface IExternalStorage {
+export interface IExternalStorage {
   _id: bigint;
   name: string;
   kind: number;

@@ -4,6 +4,7 @@ import { Job } from 'bullmq';
 import { IEncodingSetting, IVideoData } from './video-data.interface';
 import { StreamManifest } from '../../../utils';
 import { ParsedHDRMetadataResult } from '../../../utils/hdr-metadata.util';
+import { HDRTransfer } from '../../../utils/mediainfo.util';
 
 export interface EncodeVideoOptions {
   inputFile: string;
@@ -44,6 +45,7 @@ export interface VideoSourceInfo {
   height: number;
   language: string | null;
   isHDR: boolean;
+  hdrTransfer: HDRTransfer;
   sourceH264Params: string;
   hdrParams: ParsedHDRMetadataResult | null;
 }
@@ -57,4 +59,6 @@ export interface ResolveVideoFiltersOptions {
   quality?: number;
   hdrTonemap?: boolean;
   bitDepth?: number;
+  sourceInfo?: VideoSourceInfo;
+  useLibplacebo?: boolean;
 }

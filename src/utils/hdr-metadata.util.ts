@@ -82,6 +82,8 @@ export interface ParsedHDRMetadataResult {
   libsvtav1Params: string;
   libaomav1Params: string;
   hdrFormat: number;
+  maxCll: number | null;
+  masteringMaxLuminance: number | null;
 }
 
 class MdItem {
@@ -154,7 +156,7 @@ class MasteringDisplayData {
   }
 
   toX265Params(): string {
-    return `display=G${this.green.toX265()}B${this.blue.toX265()}R${this.red.toX265()}` +
+    return `master-display=G${this.green.toX265()}B${this.blue.toX265()}R${this.red.toX265()}` +
       `WP${this.whitePoint.toX265()}` +
       `L(${this.maxLuminance.expandToRatio(10000)},${this.minLuminance.expandToRatio(10000)})`;
   }
@@ -267,17 +269,19 @@ export class HDRMetadataHelper {
     let libsvtav1Params: string = colorData.toLibsvtav1Params();
     let ffmpegParams: string = colorData.toFfmpegOptions();
     const ffmpegParamsArray: string[] = colorData.toFfmpegOptionsArray();
-    let hdrFormat: number | null = null;
+    let hdrFormat: number = 0;
+    let maxCll: number | null = null;
+    let masteringMaxLuminance: number | null = null;
 
     let doviFFmpegParamAdded: boolean = false;
-    const sideDataList = frameData['side_data_list'];
+    const sideDataList = frameData['side_data_list'] || [];
     for (const sideData of sideDataList) {
       if (sideData['side_data_type'] === 'Mastering display metadata') {
         const masteringDisplayData = new MasteringDisplayData(sideData);
         x265Params += ':' + masteringDisplayData.toX265Params();
         libsvtav1Params += ':' + masteringDisplayData.toLibsvtav1Params();
-        if (!(hdrFormat & HDRFormat.HDR10))
-          hdrFormat = hdrFormat | HDRFormat.HDR10;
+        masteringMaxLuminance = masteringDisplayData.maxLuminance.floatValue;
+        hdrFormat = hdrFormat | HDRFormat.HDR10;
         logger?.debug('Mastering display metadata:');
         logger?.debug(masteringDisplayData.toString());
 
@@ -285,21 +289,24 @@ export class HDRMetadataHelper {
         const contentLightLevelData = new ContentLightLevelData(sideData);
         x265Params += ':' + contentLightLevelData.toX265Params();
         libsvtav1Params += ':' + contentLightLevelData.toLibsvtav1Params();
-        if (!(hdrFormat & HDRFormat.HDR10))
-          hdrFormat = hdrFormat | HDRFormat.HDR10;
+        maxCll = contentLightLevelData.maxContent;
+        hdrFormat = hdrFormat | HDRFormat.HDR10;
         logger?.debug('Content light level metadata:');
         logger?.debug(contentLightLevelData.toString());
-      } else if (['HDR Dynamic Metadata SMPTE2094-40 (HDR10+)', 'Dolby Vision RPU Data', 'Dolby Vision Metadata'].includes(sideData['side_data_type'])) {
+
+      } else if (sideData['side_data_type'] === 'HDR Dynamic Metadata SMPTE2094-40 (HDR10+)') {
+        hdrFormat = hdrFormat | HDRFormat.HDR10_PLUS;
+        logger?.debug('HDR10+ dynamic metadata present');
+
+      } else if (sideData['side_data_type'] === 'Dolby Vision RPU Data' ||
+        sideData['side_data_type'] === 'Dolby Vision Metadata') {
+        hdrFormat = hdrFormat | HDRFormat.DOLBY_VISION;
         if (!doviFFmpegParamAdded) {
           ffmpegParamsArray.push('-dolbyvision', '1');
           ffmpegParams += ' ' + '-dolbyvision 1';
           doviFFmpegParamAdded = true;
         }
-        if (sideData['side_data_type'] === 'HDR Dynamic Metadata SMPTE2094-40 (HDR10+)') {
-          if (!(hdrFormat & HDRFormat.HDR10_PLUS))
-            hdrFormat = hdrFormat | HDRFormat.HDR10_PLUS;
-        } else if (!(hdrFormat & HDRFormat.DOLBY_VISION))
-          hdrFormat = hdrFormat | HDRFormat.DOLBY_VISION;
+        logger?.debug('Dolby Vision RPU present, enabling -dolbyvision');
       }
     }
 
@@ -307,14 +314,16 @@ export class HDRMetadataHelper {
     logger?.debug(`x265 params: ${x265Params}`);
     logger?.debug(`libsvtav1 params: ${libsvtav1Params}`);
     logger?.debug(`libaom-av1 params: ${libaomAv1Params}`);
-    logger?.debug(`hdr format: ${hdrFormat}`);
+    logger?.debug(`hdr format: ${hdrFormat}, maxCll: ${maxCll}, masteringMaxLuminance: ${masteringMaxLuminance}`);
 
     const result: ParsedHDRMetadataResult = {
       ffmpegParams: ffmpegParamsArray,
       x265Params: x265Params,
       libsvtav1Params: libsvtav1Params,
       libaomav1Params: libaomAv1Params,
-      hdrFormat: hdrFormat
+      hdrFormat: hdrFormat,
+      maxCll: maxCll,
+      masteringMaxLuminance: masteringMaxLuminance
     };
 
     return result;
@@ -340,19 +349,30 @@ export class HDRMetadataHelper {
         outputJson += data;
       });
 
+      ffmpeg.on('error', (err) => reject(err));
+
       ffmpeg.on('exit', (code: number) => {
         if (code !== 0) {
           reject({ code, message: `FFmpeg exited with status code: ${code}` });
-        } else {
+          return;
+        }
+        try {
           const metadata = JSON.parse(outputJson);
-          const streamCodecType = metadata['streams'][0]['codec_type'];
-          if (streamCodecType === 'video') {
-            const result = this.parseFrameData(metadata['frames'][0]);
-            resolve(result);
-          } else {
+          const streamCodecType = metadata['streams']?.[0]?.['codec_type'];
+          if (streamCodecType !== 'video') {
             logger?.warning(`Selected stream type '${streamCodecType}' is not a video stream. Skipping...`);
             resolve(null);
+            return;
           }
+          const frameData = metadata['frames']?.[0];
+          if (!frameData) {
+            logger?.warning('No frame data returned by ffprobe. Skipping...');
+            resolve(null);
+            return;
+          }
+          resolve(this.parseFrameData(frameData, logger));
+        } catch (e) {
+          reject(e);
         }
       });
     });

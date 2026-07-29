@@ -2,6 +2,12 @@ import child_process from 'child_process';
 
 import { stringHelper } from './string-helper.util';
 
+export enum HDRTransfer {
+  SDR = 0,
+  PQ = 1,
+  HLG = 2
+}
+
 export class MediaInfoHelper {
   knwonEncodingSettings = ['cabac', 'ref', 'deblock', 'analyse', 'me', 'subme', 'psy', 'psy_rd', 'mixed_ref', 'me_range',
     'chroma_me', 'trellis', '8x8dct', 'deadzone', 'fast_pskip', 'nr', 'decimate', 'interlaced', 'constrained_intra',
@@ -57,10 +63,14 @@ export class MediaInfoHelper {
     return filteredList.join(':');
   }
 
-  isHDRVideo(colorSpace: string, colorTransfer: string, colorPrimaries: string) {
-    if (colorSpace === 'bt2020nc' && colorTransfer === 'smpte2084' && colorPrimaries === 'bt2020')
-      return true;
-    return false;
+  getHDRTransfer(colorTransfer: string): HDRTransfer {
+    if (colorTransfer === 'smpte2084') return HDRTransfer.PQ;
+    if (colorTransfer === 'arib-std-b67') return HDRTransfer.HLG;
+    return HDRTransfer.SDR;
+  }
+
+  isHDRVideo(colorTransfer: string) {
+    return this.getHDRTransfer(colorTransfer) !== HDRTransfer.SDR;
   }
 
   getVideoFrameRate(avgFrameRate: string, rFrameRate: string, mediainfoFrameRate: string) {

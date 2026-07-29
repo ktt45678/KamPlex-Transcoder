@@ -10,6 +10,8 @@ import fs from 'fs';
 import child_process from 'child_process';
 
 import { ffmpegHelper } from './ffmpeg-helper.util';
+import { hdrTonemapFilters, HDRTonemapSource } from './hdr-tonemap.util';
+import { HDRTransfer } from './mediainfo.util';
 import { RejectCode } from '../enums/reject-code.enum';
 import { fileHelper } from './file-helper.util';
 import { rgbaToThumbHash } from './thumbhash.util';
@@ -31,6 +33,9 @@ interface InputOptions {
   /** Is HDR Video. */
   isHDR: boolean;
 
+  /** Source HDR characteristics. Defaults to PQ with an unknown peak when omitted. */
+  hdrSource?: HDRTonemapSource;
+
   /** Path to FFmpeg Folder */
   ffmpegDir: string;
 
@@ -38,7 +43,7 @@ interface InputOptions {
 
   jobId: string | number;
 
-  canceledJobIds: (string | number)[];
+  onCancel?: (stop: () => void) => (() => void);
 
   logger?: Logger;
 }
@@ -326,7 +331,7 @@ function generateThumbnails(inputFile: string, outputFolder: string, maxWidth: n
     ];
     // HDR tonemap filter
     if (input.isHDR)
-      videoFilters.push('zscale=t=linear:npl=100,format=gbrpf32le,tonemap=tonemap=mobius:desat=0,zscale=p=bt709:t=bt709:m=bt709:r=tv:d=error_diffusion,format=yuv420p');
+      videoFilters.push(...hdrTonemapFilters(input.hdrSource ?? { transfer: HDRTransfer.PQ }));
 
     const args = [
       '-hide_banner', '-y',
@@ -370,15 +375,11 @@ function generateThumbnails(inputFile: string, outputFolder: string, maxWidth: n
       stdout.write(data);
     });
 
-    const cancelledJobChecker = setInterval(() => {
-      const index = input.canceledJobIds.findIndex(j => +j === +input.jobId);
-      if (index === -1) return;
-
-      input.canceledJobIds = input.canceledJobIds.filter(id => +id > +input.jobId);
+    const cancelCleanup = input.onCancel?.(() => {
       isCancelled = true;
       ffmpeg.stdin.write('q');
       ffmpeg.stdin.end();
-    }, 5000);
+    });
 
     const progressTimeoutChecker = setInterval(() => {
       if (isProgressTimeout) {
@@ -391,7 +392,7 @@ function generateThumbnails(inputFile: string, outputFolder: string, maxWidth: n
 
     ffmpeg.on('exit', (code: number) => {
       stdout.write('\n');
-      clearInterval(cancelledJobChecker);
+      cancelCleanup?.();
       clearInterval(progressTimeoutChecker);
       if (isCancelled) {
         reject(RejectCode.JOB_CANCEL);

@@ -1,6 +1,6 @@
 import { Schema, model } from 'mongoose';
 
-interface ISetting {
+export interface ISetting {
   _id: bigint;
   defaultVideoCodecs: number;
   audioParams: string;
@@ -16,7 +16,7 @@ interface ISetting {
   videoEncodingSettings: IEncodingSetting[];
 }
 
-interface IEncodingSetting {
+export interface IEncodingSetting {
   quality: number;
   crf: number;
   h265Crf: number;

@@ -18,7 +18,7 @@ export interface ConvertOptions {
   videoOnly?: boolean;
   useURLInput?: boolean;
   jobId: string | number;
-  canceledJobIds: (string | number)[];
+  onCancel?: (stop: () => void) => (() => void);
   logFn?: (message: string) => void;
 }
 
@@ -30,7 +30,7 @@ export interface RemuxOptions {
   audioCodec?: string;
   useURLInput?: boolean;
   jobId: string | number;
-  canceledJobIds: (string | number)[];
+  onCancel?: (stop: () => void) => (() => void);
   logFn?: (message: string) => void;
 }
 
@@ -82,16 +82,12 @@ export class VideoSourceHelper {
         stdout.write(data);
       });
 
-      const cancelledJobChecker = setInterval(() => {
-        const index = options.canceledJobIds.findIndex(j => +j === +options.jobId);
-        if (index === -1) return;
-
-        options.canceledJobIds = options.canceledJobIds.filter(id => +id > +options.jobId);
+      const cancelCleanup = options.onCancel?.(() => {
         isCancelled = true;
         ffmpeg.stdin.write('q');
         ffmpeg.stdin.end();
         rclone?.kill('SIGINT');
-      }, 5000);
+      });
 
       const watcher = chokidar.watch(`${outputFolder}/segment_*.mkv`, {
         persistent: true,
@@ -120,14 +116,16 @@ export class VideoSourceHelper {
       ffmpeg.on('exit', (code: number) => {
         stdout.write('\n');
         if (isCancelled) {
+          cancelCleanup?.();
           reject(RejectCode.JOB_CANCEL);
         } else if (code !== 0) {
+          cancelCleanup?.();
           reject({ code, message: `FFmpeg exited with status code: ${code}` });
         } else {
           stdout.write(`Uploading remaining segments\n`);
           rclone = uploadSegment(`"${outputFolder}"`);
           rclone.on('exit', (code: number) => {
-            clearInterval(cancelledJobChecker);
+            cancelCleanup?.();
             if (isCancelled) {
               reject(RejectCode.JOB_CANCEL);
             } else if (code !== 0) {
@@ -188,19 +186,15 @@ export class VideoSourceHelper {
         stdout.write(data);
       });
 
-      const cancelledJobChecker = setInterval(() => {
-        const index = options.canceledJobIds.findIndex(j => +j === +options.jobId);
-        if (index === -1) return;
-
-        options.canceledJobIds = options.canceledJobIds.filter(id => +id > +options.jobId);
+      const cancelCleanup = options.onCancel?.(() => {
         isCancelled = true;
         ffmpeg.stdin.write('q');
         ffmpeg.stdin.end();
-      }, 5000);
+      });
 
       ffmpeg.on('exit', (code: number) => {
         stdout.write('\n');
-        clearInterval(cancelledJobChecker);
+        cancelCleanup?.();
         if (isCancelled) {
           reject(RejectCode.JOB_CANCEL);
         } else if (code !== 0) {

@@ -1,5 +1,6 @@
 export * from './audio-codec.enum';
 export * from './hdr-format.enum';
+export * from './hdr-tonemap.enum';
 export * from './media-storage-type.enum';
 export * from './progress-code.enum';
 export * from './reject-code.enum';
