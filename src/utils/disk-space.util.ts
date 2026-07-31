@@ -12,6 +12,13 @@ export class DiskSpaceUtil {
     }
   }
 
+  async hasFreeSpaceForSize(size: number, folder: string, reserve: number = 1073741824) {
+    if (!size)
+      return false;
+    const freeSpace = await this.getFreeSpace(path.resolve(folder));
+    return freeSpace > size + reserve;
+  }
+
   async hasFreeSpaceToCopyFile(filePath: string, copyFolder: string) {
     try {
       const { size } = await fs.promises.stat(filePath);

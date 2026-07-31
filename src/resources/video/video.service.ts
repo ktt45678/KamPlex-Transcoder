@@ -16,8 +16,8 @@ import { externalStorageModel, IExternalStorage } from '../../models/external-st
 import { mediaStorageModel } from '../../models/media-storage.model';
 import { settingModel } from '../../models/setting.model';
 import { mediaModel } from '../../models/media.model';
-import { IVideoData, IJobData, IStorage, IEncodingSetting, MediaQueueResult, EncodeAudioOptions, EncodeVideoOptions, VideoSourceInfo, CreateAudioEncodingArgsOptions, CreateVideoEncodingArgsOptions, EncodeAudioByTrackOptions, AdvancedVideoSettings, ResolveVideoFiltersOptions, ValidateSourceQualityOptions } from './interfaces';
-import { AudioCodec, StatusCode, VideoCodec, RejectCode, TaskQueue, HDRTonemap } from '../../enums';
+import { IVideoData, IJobData, IStorage, IEncodingSetting, MediaQueueResult, EncodeAudioOptions, EncodeVideoOptions, VideoSourceInfo, CreateAudioEncodingArgsOptions, CreateVideoEncodingArgsOptions, EncodeAudioByTrackOptions, AdvancedVideoSettings, ResolveVideoFiltersOptions, ValidateSourceQualityOptions, ReadSourceMetadataOptions, SourceMetadata } from './interfaces';
+import { AudioCodec, StatusCode, VideoCodec, RejectCode, TaskQueue, HDRTonemap, HDRFormat } from '../../enums';
 import { ENCODING_QUALITY, AUDIO_PARAMS, AUDIO_SURROUND_PARAMS, VIDEO_H264_PARAMS, VIDEO_H265_PARAMS, VIDEO_VP9_PARAMS, VIDEO_AV1_PARAMS, AUDIO_SPEED_PARAMS, AUDIO_SURROUND_OPUS_PARAMS, NEXT_GEN_ENCODING_QUALITY, SPLIT_SEGMENT_FOLDER, CONCAT_SEGMENT_FILE, CANCELED_JOBS_FILE, VIDEO_INPUT_PARAMS } from '../../config';
 import { HlsManifest, RcloneFile } from '../../common/interfaces';
 import { KamplexApiService } from '../../common/modules/kamplex-api';
@@ -25,7 +25,8 @@ import { TranscoderApiService } from '../../common/modules/transcoder-api';
 import {
   createSnowFlakeId, diskSpaceUtil, ffmpegHelper, fileHelper, generateSprites, hdrMetadataHelper, mediaInfoHelper,
   MediaInfoResult, StringCrypto, stringHelper, StreamManifest, rcloneHelper, videoSourceHelper, isEqualShallow,
-  HDRTransfer, hdrTonemapFilters, libplaceboTonemapFilters, ParsedHDRMetadataResult,
+  HDRTransfer, hdrTonemapFilters, libplaceboTonemapFilters, ParsedHDRMetadataResult, pixelFormatForBitDepth,
+  hdrDynamicMetadataHelper, ExtractedHDRDynamicMetadata, resolveHdr10PlusParamPath, planSegments,
   LIBPLACEBO_HW_DEVICE_ARGS
 } from '../../utils';
 import { Progress } from '../../common/entities';
@@ -250,6 +251,7 @@ export class VideoService implements OnModuleInit {
     const runtime = videoInfo.format.duration ? Math.trunc(+videoInfo.format.duration) : 0;
     const videoDuration = videoTrack.duration ? Math.trunc(+videoTrack.duration) : runtime;
     const videoFps = mediaInfoHelper.getVideoFrameRate(videoTrack.avg_frame_rate, videoTrack.r_frame_rate, videoMITrack.FrameRate);
+    const videoExactFps = videoTrack.avg_frame_rate || videoTrack.r_frame_rate || videoMITrack.FrameRate;
     const videoBitrate = videoTrack.bit_rate ? Math.round(+videoTrack.bit_rate / 1000) :
       videoMITrack.BitRate ? Math.round(+videoMITrack.BitRate / 1000) : 0; // Bitrate in Kbps
     const videoCodec = videoTrack.codec_name || '';
@@ -369,8 +371,23 @@ export class VideoService implements OnModuleInit {
     }
 
     let remuxFileName: string | null = null;
+    let sourceMetadata: SourceMetadata = { hdrDynamicMetadata: { hdr10PlusJsonFile: null }, frameIndex: null };
     try {
       if (!job.data.advancedOptions?.audioOnly) {
+        const hdrTransfer = mediaInfoHelper.getHDRTransfer(videoTrack.color_transfer);
+        const isHDRVideo = hdrTransfer !== HDRTransfer.SDR;
+        let hdrParams: ParsedHDRMetadataResult | null = null;
+        if (isHDRVideo) {
+          try {
+            hdrParams = await hdrMetadataHelper.getHdrMetadata(linkedInputUrl || inputFile, 0, ffmpegDir, this.logger);
+          } catch (e) {
+            this.logger.warning(`Failed to read HDR metadata: ${e.message}`);
+          }
+        }
+        const metadataOptions = {
+          inputFile, transcodeDir, parsedInput, videoCodec, hdrParams,
+          exactFps: videoExactFps, job
+        };
         // Only remux when enable SplitEncoding, UseURLInput, source is not mkv
         if (this.SplitEncoding && this.UseURLInput && !['.mkv'].includes(parsedInput.ext)) {
           await this.transcoderApiService.checkAndWaitForTranscoderPriority();
@@ -390,26 +407,24 @@ export class VideoService implements OnModuleInit {
             onCancel: (stop) => this.createCancelJobChecker(job.id, stop),
             logFn: (message) => { this.logger.info(message) }
           });
+          // Read metadata before uploading
+          sourceMetadata = await this.readSourceMetadata({
+            ...metadataOptions, source: remuxFilePath, isURL: false, allowTemporaryCopy: false
+          });
           const moveRemuxFileArgs = this.createRcloneMoveArgs(remuxFilePath, remuxUrlFolder);
           await this.uploadMedia(moveRemuxFileArgs, job.id);
           linkedInputUrl = this.getLinkedSourceRemuxUrl(streamStorage, job.data._id, remuxFileName);
-        }
-        // Video info
-        const hdrTransfer = mediaInfoHelper.getHDRTransfer(videoTrack.color_transfer);
-        const isHDRVideo = hdrTransfer !== HDRTransfer.SDR;
-        let hdrParams: ParsedHDRMetadataResult | null = null;
-        if (isHDRVideo) {
-          try {
-            hdrParams = await hdrMetadataHelper.getHdrMetadata(linkedInputUrl || inputFile, 0, ffmpegDir, this.logger);
-          } catch (e) {
-            const message = (<{ message?: string }>e)?.message || e.toString();
-            this.logger.warning(`Failed to read HDR metadata: ${message}`);
-          }
+        } else {
+          sourceMetadata = await this.readSourceMetadata({
+            ...metadataOptions, source: linkedInputUrl || inputFile, isURL: !!linkedInputUrl,
+            allowTemporaryCopy: true
+          });
         }
         const sourceInfo: VideoSourceInfo = {
-          duration: videoDuration, fps: videoFps, bitrate: videoBitrate, codec: videoCodec, sourceH264Params: videoSourceH264Params,
+          duration: videoDuration, fps: videoFps, exactFps: videoExactFps,
+          bitrate: videoBitrate, codec: videoCodec, sourceH264Params: videoSourceH264Params,
           width: srcWidth, height: srcHeight, language: mediaInfo.originalLang, isHDR: isHDRVideo, hdrTransfer: hdrTransfer,
-          hdrParams: hdrParams
+          hdrParams: hdrParams, hdrDynamicMetadata: sourceMetadata.hdrDynamicMetadata, frameIndex: sourceMetadata.frameIndex
         };
         if (codec === VideoCodec.H264) {
           this.logger.info('Video codec: H264');
@@ -504,6 +519,7 @@ export class VideoService implements OnModuleInit {
       throw new Error(statusError.errorCode);
     } finally {
       this.logger.info('Cleaning up');
+      await hdrDynamicMetadataHelper.cleanup(sourceMetadata.hdrDynamicMetadata);
       await fileHelper.deleteFolder(transcodeDir);
       // Remove remux file if exist
       if (remuxFileName) {
@@ -556,6 +572,111 @@ export class VideoService implements OnModuleInit {
 
   private setTranscoderPriority(priority: number) {
     this.TranscoderPriority = priority;
+  }
+
+  private async readSourceMetadata(options: ReadSourceMetadataOptions): Promise<SourceMetadata> {
+    const { inputFile, transcodeDir, parsedInput, videoCodec, exactFps, hdrParams, allowTemporaryCopy, job } = options;
+    let source = options.source;
+    let isURL = options.isURL;
+    let temporaryFile: string | null = null;
+
+    if (isURL && allowTemporaryCopy) {
+      const alreadyDownloaded = await fileHelper.fileExists(inputFile);
+      if (!alreadyDownloaded && this.SplitEncoding)
+        temporaryFile = await this.downloadMetadataSource(inputFile, transcodeDir, job);
+      if (alreadyDownloaded || temporaryFile) {
+        source = inputFile;
+        isURL = false;
+      }
+    }
+
+    const needsPipe = isURL || path.extname(source).toLowerCase() !== '.mkv';
+
+    try {
+      const hdrDynamicMetadata = await this.extractHdrDynamicMetadata(source, needsPipe, isURL, parsedInput,
+        videoCodec, hdrParams, job);
+      const frameIndex = await this.createSourceFrameIndex(source, isURL, exactFps);
+      return { hdrDynamicMetadata, frameIndex };
+    } finally {
+      if (temporaryFile) {
+        this.logger.info(`Removing temporary source copy: ${temporaryFile}`);
+        await fileHelper.deleteFile(temporaryFile);
+      }
+    }
+  }
+
+  private async downloadMetadataSource(inputFile: string, transcodeDir: string, job: Job<IVideoData>) {
+    // File size + 2GB reserved
+    const hasFreeSpace = await diskSpaceUtil.hasFreeSpaceForSize(job.data.size, transcodeDir, 2147483648);
+    if (!hasFreeSpace) {
+      this.logger.warning('Not enough disk space for a temporary source copy, reading metadata from URL');
+      return null;
+    }
+    this.logger.info(`Downloading source for metadata: ${job.data.filename}`);
+    try {
+      const downloadStorage = job.data.linkedStorage || job.data.storage;
+      await rcloneHelper.downloadFile(this.configService.get<string>('RCLONE_CONFIG_FILE'),
+        this.configService.get<string>('RCLONE_DIR'), downloadStorage, job.data.path, job.data.filename,
+        transcodeDir, !!job.data.linkedStorage, (args => {
+          this.logger.info('rclone ' + args.join(' '));
+        }));
+      if (job.data.linkedStorage)
+        await fileHelper.renameFile(`${transcodeDir}/${job.data.filename}`, inputFile);
+      return inputFile;
+    } catch (e) {
+      this.logger.warning(`Failed to download the source for metadata: ${e.message}`);
+      await fileHelper.deleteFile(inputFile);
+      return null;
+    }
+  }
+
+  private async createSourceFrameIndex(inputFile: string, useURLInput: boolean, exactFps: string) {
+    if (!this.SplitEncoding)
+      return null;
+    this.logger.info(`Reading frame timestamps: ${inputFile}`);
+    return hdrDynamicMetadataHelper.createFrameIndex({
+      inputFile,
+      ffmpegDir: this.configService.get<string>('FFMPEG_DIR'),
+      exactFps,
+      useURLInput,
+      logFn: (message) => { this.logger.info(message) }
+    });
+  }
+
+  private async extractHdrDynamicMetadata(inputFile: string, useFFmpegPipe: boolean, useURLInput: boolean, parsedInput: path.ParsedPath,
+    videoCodec: string, hdrParams: ParsedHDRMetadataResult | null, job: Job<IVideoData>): Promise<ExtractedHDRDynamicMetadata> {
+    const empty: ExtractedHDRDynamicMetadata = { hdr10PlusJsonFile: null };
+    const hdrToolsDir = this.configService.get<string>('HDRTOOLS_DIR');
+    if (!hdrToolsDir || !hdrParams || !(hdrParams.hdrFormat & HDRFormat.HDR10_PLUS))
+      return empty;
+    if (!['hevc', 'h265'].includes(videoCodec)) {
+      this.logger.info(`Source codec '${videoCodec}' is not H265, skipping dynamic HDR metadata extraction`);
+      return empty;
+    }
+    this.logger.info(`Extracting dynamic HDR metadata from: ${inputFile}`);
+    this.setTranscoderPriority(1);
+    try {
+      return await hdrDynamicMetadataHelper.extract({
+        inputFile,
+        outputDir: parsedInput.dir,
+        outputBaseName: parsedInput.name,
+        hdrFormat: hdrParams.hdrFormat,
+        hdrToolsDir,
+        ffmpegDir: this.configService.get<string>('FFMPEG_DIR'),
+        useFFmpegPipe,
+        useURLInput,
+        onCancel: (stop) => this.createCancelJobChecker(job.id, stop),
+        logFn: (message) => { this.logger.info(message) }
+      });
+    } catch (e) {
+      if (e === RejectCode.JOB_CANCEL)
+        throw e;
+      const message = (<{ message?: string }>e)?.message || e.toString();
+      this.logger.warning(`Failed to extract dynamic HDR metadata: ${message}`);
+      return empty;
+    } finally {
+      this.setTranscoderPriority(0);
+    }
   }
 
   private async encodeAudioByTrack(options: EncodeAudioByTrackOptions) {
@@ -767,14 +888,17 @@ export class VideoService implements OnModuleInit {
     const { inputFile, parsedInput, inputFileUrl, sourceInfo, advancedSettings = {}, codec, videoParams, job } = options;
     const segmentFolder = `${parsedInput.dir}/${SPLIT_SEGMENT_FOLDER}`;
     const concatSegmentFile = `${segmentFolder}/${CONCAT_SEGMENT_FILE}`;
-    let totalSegments = Math.ceil(sourceInfo.duration / segmentDuration);
-    this.logger.info(`Total segments: ${totalSegments}`);
+    const segments = planSegments(sourceInfo.duration, segmentDuration, sourceInfo.frameIndex);
+    const totalSegments = segments.length;
+    this.logger.info(`Total segments: ${totalSegments}` +
+      (segments[0]?.frameCount != null ? ` (cut by frame count, ${sourceInfo.frameIndex.source})` : ' (cut by duration)'));
 
     //Create segment folder
     await fileHelper.createDir(segmentFolder);
     this.setTranscoderPriority(1);
 
-    for (let i = 0; i < totalSegments; i++) {
+    for (const segment of segments) {
+      const i = segment.index;
       // const handleSegmentError = () => {
       //   this.logger.info('Received error 139 from FFmpeg');
       //   const oldTotalSegments = totalSegments;
@@ -788,10 +912,19 @@ export class VideoService implements OnModuleInit {
       // Output mkv for dynamic HDR retention when muxing with mp4box, otherwise use mp4 due to H264 compability
       const segmentFileName = codec === VideoCodec.AV1 && sourceInfo.isHDR ? `${quality}_${i}.mkv` : `${quality}_${i}.mp4`;
       const segmentFileSubPath = `${SPLIT_SEGMENT_FOLDER}/${segmentFileName}`;
+      // Create segment for HDR10+ JSON
+      const segmentHdr10PlusJsonFile = await hdrDynamicMetadataHelper.createSegmentJson({
+        jsonFile: sourceInfo.hdrDynamicMetadata?.hdr10PlusJsonFile,
+        outputFile: `${segmentFolder}/${quality}_${i}_hdr10plus.json`,
+        startFrame: segment.startFrame,
+        frameCount: segment.frameCount,
+        logFn: (message) => { this.logger.warning(`Segment ${i + 1}: ${message}`) }
+      });
+      let segmentFrames: number | null = null;
       // Wait until the primary transcoder is not busy
       while (true) {
         await this.transcoderApiService.checkAndWaitForTranscoderPriority();
-        const startTime = i * segmentDuration;
+        const startTime = segment.startTime;
         this.logger.info(`Segments ${i + 1}/${totalSegments}`);
         this.CanRetryEncoding = true;
         if (codec === VideoCodec.H264 || codec === VideoCodec.H265 || codec === VideoCodec.AV1) {
@@ -799,10 +932,13 @@ export class VideoService implements OnModuleInit {
           const videoArgs = this.createVideoEncodingArgs({
             inputFile: inputFileUrl || inputFile, parsedInput, codec, quality, videoParams,
             sourceInfo, crfKey, advancedSettings, encodingSetting: perQualitySettings, splitFrom: startTime.toString(),
-            splitDuration: segmentDuration.toString(), segmentIndex: i, outputFileName: segmentFileSubPath
+            splitDuration: segmentDuration.toString(), splitFrames: segment.frameCount, segmentIndex: i,
+            hdr10PlusJsonFile: segmentHdr10PlusJsonFile,
+            outputFileName: segmentFileSubPath
           });
           try {
-            await this.encodeMedia(videoArgs, segmentDuration, job.id);
+            const encodingResult = await this.encodeMedia(videoArgs, segmentDuration, job.id);
+            segmentFrames = encodingResult?.frame ?? null;
           } catch (e) {
             if (e === RejectCode.RETRY_ENCODING) {
               this.logger.info('Retrying encoding (user input)');
@@ -823,17 +959,22 @@ export class VideoService implements OnModuleInit {
           const videoPass1Args = this.createTwoPassesVideoEncodingArgs({
             inputFile: inputFileUrl || inputFile, parsedInput, codec, quality, videoParams,
             sourceInfo, crfKey: 'cq', advancedSettings, encodingSetting: perQualitySettings, pass: 1, splitFrom: startTime.toString(),
-            splitDuration: segmentDuration.toString(), segmentIndex: i, outputFileName: segmentFileSubPath
+            splitDuration: segmentDuration.toString(), splitFrames: segment.frameCount, segmentIndex: i,
+            hdr10PlusJsonFile: segmentHdr10PlusJsonFile,
+            outputFileName: segmentFileSubPath
           });
           // Pass 2 params
           const videoPass2Args = this.createTwoPassesVideoEncodingArgs({
             inputFile: inputFileUrl || inputFile, parsedInput, codec, quality, videoParams,
             sourceInfo, crfKey: 'cq', advancedSettings, encodingSetting: perQualitySettings, pass: 2, splitFrom: startTime.toString(),
-            splitDuration: segmentDuration.toString(), segmentIndex: i, outputFileName: segmentFileSubPath
+            splitDuration: segmentDuration.toString(), splitFrames: segment.frameCount, segmentIndex: i,
+            hdr10PlusJsonFile: segmentHdr10PlusJsonFile,
+            outputFileName: segmentFileSubPath
           });
           try {
             await this.encodeMedia(videoPass1Args, segmentDuration, job.id);
-            await this.encodeMedia(videoPass2Args, segmentDuration, job.id);
+            const encodingResult = await this.encodeMedia(videoPass2Args, segmentDuration, job.id);
+            segmentFrames = encodingResult?.frame ?? null;
           } catch (e) {
             if (e === RejectCode.RETRY_ENCODING) {
               this.logger.info('Retrying encoding (user input)');
@@ -853,6 +994,11 @@ export class VideoService implements OnModuleInit {
         break;
       }
 
+      // Skip merging empty segments
+      if (segmentFrames === 0) {
+        this.logger.warning(`Segment ${i + 1}/${totalSegments} encoded no frames, skipping merge`);
+        continue;
+      }
       await fileHelper.appendToFile(concatSegmentFile, `file ${segmentFileName}\n`);
     }
 
@@ -985,8 +1131,8 @@ export class VideoService implements OnModuleInit {
 
   private createVideoEncodingArgs(options: CreateVideoEncodingArgsOptions) {
     const { inputFile, parsedInput, codec, quality, videoParams, sourceInfo, crfKey, advancedSettings, encodingSetting,
-      splitFrom, splitDuration, outputFileName } = options;
-    const gopSize = (sourceInfo.fps ? sourceInfo.fps * 2 : 48).toString();
+      splitFrom, splitDuration, splitFrames, hdr10PlusJsonFile, outputFileName } = options;
+    const gopSize = Math.round(sourceInfo.fps ? sourceInfo.fps * 2 : 48).toString();
     const bitDepth = codec === VideoCodec.H264 ? 8 : 10;
     const hdrTonemap = codec === VideoCodec.H264 && sourceInfo.isHDR;
     const useLibplacebo = hdrTonemap && this.UseLibplacebo;
@@ -1012,7 +1158,8 @@ export class VideoService implements OnModuleInit {
     }
     splitFrom && args.push('-ss', splitFrom);
     args.push('-i', `"${inputFile}"`);;
-    splitDuration && args.push('-t', splitDuration);
+    if (splitFrames) args.push('-frames:v', splitFrames.toString());
+    else splitDuration && args.push('-t', splitDuration);
     args.push(
       ...videoParams,
       '-g', gopSize,
@@ -1023,8 +1170,10 @@ export class VideoService implements OnModuleInit {
       this.resolveEncodingSettings(args, encodingSetting, sourceInfo, crfKey);
     if (codec === VideoCodec.H264)
       this.resolveH264Params(args, advancedSettings, quality, sourceInfo);
+    else if (codec === VideoCodec.H265)
+      this.resolveH265Params(args, sourceInfo, encodingSetting, hdr10PlusJsonFile);
     else if (codec === VideoCodec.AV1)
-      this.resolveSVTAV1Params(args, advancedSettings, sourceInfo);
+      this.resolveSVTAV1Params(args, sourceInfo, hdr10PlusJsonFile);
     args.push(
       '-map', '0:v:0',
       //'-map_metadata', '-1',
@@ -1038,8 +1187,8 @@ export class VideoService implements OnModuleInit {
 
   private createTwoPassesVideoEncodingArgs(options: CreateVideoEncodingArgsOptions & { pass: number }) {
     const { inputFile, parsedInput, codec, quality, videoParams, sourceInfo, crfKey, advancedSettings, encodingSetting, pass,
-      splitFrom, splitDuration, segmentIndex, outputFileName } = options;
-    const gopSize = (sourceInfo.fps ? sourceInfo.fps * 2 : 48).toString();
+      splitFrom, splitDuration, splitFrames, segmentIndex, hdr10PlusJsonFile, outputFileName } = options;
+    const gopSize = Math.round(sourceInfo.fps ? sourceInfo.fps * 2 : 48).toString();
     const bitDepth = codec === VideoCodec.H264 ? 8 : 10;
     const videoFilters = this.resolveVideoFilters({ quality, hdrTonemap: false, bitDepth, sourceInfo });
     if (pass === 1) {
@@ -1058,7 +1207,8 @@ export class VideoService implements OnModuleInit {
       }
       splitFrom && args.push('-ss', splitFrom);
       args.push('-i', `"${inputFile}"`);
-      splitDuration && args.push('-t', splitDuration);
+      if (splitFrames) args.push('-frames:v', splitFrames.toString());
+      else splitDuration && args.push('-t', splitDuration);
       args.push(...videoParams,
         '-g', gopSize,
         '-keyint_min', gopSize,
@@ -1068,8 +1218,10 @@ export class VideoService implements OnModuleInit {
         this.resolveEncodingSettings(args, encodingSetting, sourceInfo, crfKey);
       if (codec === VideoCodec.H264)
         this.resolveH264Params(args, advancedSettings, quality, sourceInfo);
+      else if (codec === VideoCodec.H265)
+        this.resolveH265Params(args, sourceInfo, encodingSetting, hdr10PlusJsonFile);
       else if (codec === VideoCodec.AV1)
-        this.resolveSVTAV1Params(args, advancedSettings, sourceInfo);
+        this.resolveSVTAV1Params(args, sourceInfo, hdr10PlusJsonFile);
       args.push(
         '-map', '0:v:0',
         '-vf', videoFilters,
@@ -1100,7 +1252,8 @@ export class VideoService implements OnModuleInit {
     }
     splitFrom && args.push('-ss', splitFrom);
     args.push('-i', `"${inputFile}"`);
-    splitDuration && args.push('-t', splitDuration);
+    if (splitFrames) args.push('-frames:v', splitFrames.toString());
+    else splitDuration && args.push('-t', splitDuration);
     args.push(
       ...videoParams,
       '-g', gopSize,
@@ -1111,8 +1264,10 @@ export class VideoService implements OnModuleInit {
       this.resolveEncodingSettings(args, encodingSetting, sourceInfo, crfKey);
     if (codec === VideoCodec.H264)
       this.resolveH264Params(args, advancedSettings, quality, sourceInfo);
+    else if (codec === VideoCodec.H265)
+      this.resolveH265Params(args, sourceInfo, encodingSetting, hdr10PlusJsonFile);
     else if (codec === VideoCodec.AV1)
-      this.resolveSVTAV1Params(args, advancedSettings, sourceInfo);
+      this.resolveSVTAV1Params(args, sourceInfo, hdr10PlusJsonFile);
     args.push(
       '-map', '0:v:0',
       //'-map_metadata', '-1',
@@ -1136,7 +1291,7 @@ export class VideoService implements OnModuleInit {
     crfKey: 'crf' | 'cq' = 'crf') {
     let crfValue = null;
     if (crfKey === 'crf')
-      if (sourceInfo.codec === 'h265')
+      if (sourceInfo.codec === 'h265' || sourceInfo.codec === 'hevc')
         crfValue = encodingSetting.h265Crf;
       else
         crfValue = encodingSetting.crf;
@@ -1171,26 +1326,52 @@ export class VideoService implements OnModuleInit {
     }
   }
 
-  private resolveSVTAV1Params(args: string[], advancedSettings: AdvancedVideoSettings, sourceInfo: VideoSourceInfo) {
+  private resolveH265Params(args: string[], sourceInfo: VideoSourceInfo, encodingSetting?: IEncodingSetting,
+    hdr10PlusJsonFile?: string | null) {
+    if (!sourceInfo.hdrParams)
+      return;
+    args.push(...sourceInfo.hdrParams.ffmpegParams);
+    const x265Params: string[] = [];
+    if (sourceInfo.hdrParams.x265Params)
+      x265Params.push(sourceInfo.hdrParams.x265Params);
+    const hdr10PlusParamPath = resolveHdr10PlusParamPath(hdr10PlusJsonFile,
+      sourceInfo.hdrDynamicMetadata?.hdr10PlusJsonFile, (message) => { this.logger.warning(message) });
+    if (hdr10PlusParamPath)
+      x265Params.push(`dhdr10-info=${hdr10PlusParamPath}`);
+    if (x265Params.length)
+      args.push('-x265-params', `"${x265Params.join(':')}"`);
+    if ((sourceInfo.hdrParams.hdrFormat & HDRFormat.DOLBY_VISION) && !encodingSetting?.maxrate) {
+      const fallbackMaxrate = sourceInfo.bitrate > 0 ? sourceInfo.bitrate : 20000;
+      this.logger.info(`Dolby Vision requires VBV, applying a ${fallbackMaxrate}K rate cap`);
+      args.push('-maxrate', `${fallbackMaxrate}K`, '-bufsize', `${fallbackMaxrate * 2}K`);
+    }
+  }
+
+  private resolveSVTAV1Params(args: string[], sourceInfo: VideoSourceInfo, hdr10PlusJsonFile?: string | null) {
     const svtAv1Preset = this.configService.get<string>('SVT_AV1_PRESET');
     const svtAV1PresetParams = {
       main: [
-        'tune=0', 'enable-overlays=1', 'film-grain=0', 'film-grain-denoise=0', 'scd=1', 'sharpness=0', 'enable-qm=1', 'qm-min=0',
+        'enable-overlays=1', 'film-grain=0', 'film-grain-denoise=0', 'scd=1', 'sharpness=0', 'enable-qm=1', 'qm-min=0',
         'enable-variance-boost=1',
       ],
-      psy: ['tune=0', 'enable-overlays=1', 'film-grain=0', 'film-grain-denoise=0', 'sharpness=0', 'scd=1'],
+      tritium: ['sharpness=0'],
       hdr: ['sharpness=0']
     };
-    const svtAV1Params = svtAv1Preset === 'psy' ? svtAV1PresetParams.psy : svtAv1Preset === 'hdr' ? svtAV1PresetParams.hdr : svtAV1PresetParams.main;
-    if (advancedSettings.h264Tune !== 'animation')
-      svtAV1Params.push('scm=0');
+    const svtAV1Params = svtAv1Preset === 'tritium' ? svtAV1PresetParams.tritium :
+      svtAv1Preset === 'hdr' ? svtAV1PresetParams.hdr : svtAV1PresetParams.main;
+    svtAV1Params.push('tune=0');
     if (sourceInfo.hdrParams) {
       args.push(...sourceInfo.hdrParams.ffmpegParams);
       svtAV1Params.push(sourceInfo.hdrParams.libsvtav1Params);
+      const hdr10PlusParamPath = svtAv1Preset === 'tritium' ?
+        resolveHdr10PlusParamPath(hdr10PlusJsonFile, sourceInfo.hdrDynamicMetadata?.hdr10PlusJsonFile,
+          (message) => { this.logger.warning(message) }) : null;
+      if (hdr10PlusParamPath)
+        svtAV1Params.push(`hdr10plus-json=${hdr10PlusParamPath}`);
     } else {
       svtAV1Params.push('luminance-qp-bias=30');
     }
-    const gopSize = (sourceInfo.fps ? sourceInfo.fps * 2 : 48).toString();
+    const gopSize = Math.round(sourceInfo.fps ? sourceInfo.fps * 2 : 48).toString();
     svtAV1Params.push(`keyint=${gopSize}`);
     args.push('-svtav1-params', `"${svtAV1Params.join(':')}"`);
   }
@@ -1198,6 +1379,7 @@ export class VideoService implements OnModuleInit {
   private resolveVideoFilters(options: ResolveVideoFiltersOptions) {
     const videoFilters: string[] = [];
     const useLibplacebo = options.hdrTonemap && options.useLibplacebo;
+    const pixelFormat = pixelFormatForBitDepth(options.bitDepth);
 
     if (options.quality && !useLibplacebo) {
       videoFilters.push(`scale=-2:${options.quality}`);
@@ -1205,19 +1387,16 @@ export class VideoService implements OnModuleInit {
     if (options.hdrTonemap) {
       const hdrParams = options.sourceInfo?.hdrParams;
       if (useLibplacebo) {
-        videoFilters.push(...libplaceboTonemapFilters(options.quality));
+        videoFilters.push(...libplaceboTonemapFilters(options.quality, pixelFormat));
       } else {
         videoFilters.push(...hdrTonemapFilters({
           transfer: options.sourceInfo?.hdrTransfer ?? HDRTransfer.PQ,
           maxCll: hdrParams?.maxCll,
           masteringMaxLuminance: hdrParams?.masteringMaxLuminance
-        }));
+        }, pixelFormat));
       }
-      if (options.bitDepth === 10) {
-        videoFilters.push('format=yuv420p10le');
-      } else {
-        videoFilters.push('format=yuv420p');
-      }
+    } else {
+      videoFilters.push(`format=${pixelFormat}`);
     }
     return videoFilters.join(',');
   }
@@ -1279,7 +1458,7 @@ export class VideoService implements OnModuleInit {
   }
 
   private encodeMedia(args: string[], videoDuration: number, jobId: string | number) {
-    return new Promise<void>((resolve, reject) => {
+    return new Promise<Progress | null>((resolve, reject) => {
       let isCancelled = false;
       let isRetryEncoding = false;
       let isProgressTimeout = false;
@@ -1338,7 +1517,7 @@ export class VideoService implements OnModuleInit {
         } else if (code !== 0) {
           reject({ code, message: `FFmpeg exited with status code: ${code}` });
         } else {
-          resolve();
+          resolve(lastProgress);
         }
       });
     });

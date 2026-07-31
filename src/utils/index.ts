@@ -1,6 +1,7 @@
 export * from './disk-space.util';
 export * from './ffmpeg-helper.util';
 export * from './file-helper.util';
+export * from './hdr-dynamic-metadata.util';
 export * from './hdr-metadata.util';
 export * from './hdr-tonemap.util';
 export * from './mediainfo.util';

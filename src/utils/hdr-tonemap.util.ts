@@ -25,7 +25,11 @@ export function resolveHdrPeakNits(source: HDRTonemapSource): number {
   return HDR_FALLBACK_PEAK;
 }
 
-export function hdrTonemapFilters(source: HDRTonemapSource): string[] {
+export function pixelFormatForBitDepth(bitDepth?: number): string {
+  return bitDepth === 10 ? 'yuv420p10le' : 'yuv420p';
+}
+
+export function hdrTonemapFilters(source: HDRTonemapSource, pixelFormat: string = 'yuv420p'): string[] {
   const peakNits = resolveHdrPeakNits(source);
   const npl = source.transfer === HDRTransfer.HLG ? HLG_NOMINAL_PEAK : HDR_REFERENCE_WHITE;
   const peak = peakNits / npl;
@@ -35,25 +39,26 @@ export function hdrTonemapFilters(source: HDRTonemapSource): string[] {
     'format=gbrpf32le',
     `tonemap=tonemap=hable:desat=0:peak=${peak.toFixed(4)}`,
     'zscale=p=bt709:t=bt709:m=bt709:r=tv:d=error_diffusion',
-    'format=yuv420p',
+    `format=${pixelFormat}`,
     ...hdrStripFilters()
   ];
 }
 
-export function libplaceboTonemapFilters(scaleHeight?: number): string[] {
+export function libplaceboTonemapFilters(scaleHeight?: number, pixelFormat: string = 'yuv420p'): string[] {
   const opts = [
     'colorspace=bt709',
     'color_primaries=bt709',
     'color_trc=bt709',
     'range=tv',
-    'format=yuv420p'
+    'tonemapping=spline',
+    `format=${pixelFormat}`
   ];
   if (scaleHeight) opts.unshift(`w=-2:h=${scaleHeight}`);
   return [
     'hwupload',
     `libplacebo=${opts.join(':')}`,
     'hwdownload',
-    'format=yuv420p',
+    `format=${pixelFormat}`,
     ...hdrStripFilters()
   ];
 }

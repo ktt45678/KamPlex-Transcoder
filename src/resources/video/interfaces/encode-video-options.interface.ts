@@ -4,6 +4,7 @@ import { Job } from 'bullmq';
 import { IEncodingSetting, IVideoData } from './video-data.interface';
 import { StreamManifest } from '../../../utils';
 import { ParsedHDRMetadataResult } from '../../../utils/hdr-metadata.util';
+import { ExtractedHDRDynamicMetadata, FrameIndex } from '../../../utils/hdr-dynamic-metadata.util';
 import { HDRTransfer } from '../../../utils/mediainfo.util';
 
 export interface EncodeVideoOptions {
@@ -32,14 +33,36 @@ export interface CreateVideoEncodingArgsOptions {
   encodingSetting?: IEncodingSetting;
   splitFrom?: string;
   splitDuration?: string;
+  splitFrames?: number | null;
   segmentIndex?: number;
+  hdr10PlusJsonFile?: string | null;
   outputFileName: string;
+}
+
+export interface SourceMetadata {
+  hdrDynamicMetadata: ExtractedHDRDynamicMetadata;
+  frameIndex: FrameIndex | null;
+}
+
+export interface ReadSourceMetadataOptions {
+  source: string;
+  isURL: boolean;
+  inputFile: string;
+  transcodeDir: string;
+  parsedInput: ParsedPath;
+  videoCodec: string;
+  exactFps: string;
+  hdrParams: ParsedHDRMetadataResult | null;
+  allowTemporaryCopy: boolean;
+  job: Job<IVideoData>;
 }
 
 export interface VideoSourceInfo {
   codec: string;
   duration: number;
   fps: number;
+  exactFps?: string;
+  frameIndex?: FrameIndex | null;
   bitrate: number;
   width: number;
   height: number;
@@ -48,6 +71,7 @@ export interface VideoSourceInfo {
   hdrTransfer: HDRTransfer;
   sourceH264Params: string;
   hdrParams: ParsedHDRMetadataResult | null;
+  hdrDynamicMetadata?: ExtractedHDRDynamicMetadata;
 }
 
 export interface AdvancedVideoSettings {
