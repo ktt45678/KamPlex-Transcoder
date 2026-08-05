@@ -1,3 +1,4 @@
+export * from './ffprobe-client.interface';
 export * from './hls-manifest.interface';
 export * from './rclone-file.interface';
 export * from './rclone-progress.interface';

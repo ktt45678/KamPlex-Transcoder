@@ -48,10 +48,7 @@ export class VideoSourceHelper {
       ];
 
       if (options.useURLInput) {
-        args.push(
-          '-reconnect', '1',
-          '-reconnect_on_http_error', '400,401,403,408,409,429,5xx',
-        );
+        args.push(...ffmpegHelper.urlInputArgs());
       }
 
       args.push(
@@ -151,10 +148,7 @@ export class VideoSourceHelper {
       ];
 
       if (options.useURLInput) {
-        args.push(
-          '-reconnect', '1',
-          '-reconnect_on_http_error', '400,401,403,408,409,429,5xx',
-        );
+        args.push(...ffmpegHelper.urlInputArgs());
       }
 
       args.push(

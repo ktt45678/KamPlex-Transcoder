@@ -39,6 +39,7 @@ import { TranscoderApiModule } from './common/modules/transcoder-api/transcoder-
       transports: [
         new winston.transports.Console({
           format: winston.format.combine(
+            winston.format((info) => (info['_hideFromConsole'] ? false : info))(),
             winston.format.timestamp(),
             winston.format.ms(),
             nestWinstonModuleUtilities.format.nestLike('Logger')

@@ -29,6 +29,7 @@ export interface EncodeAudioOptions {
   codec: number;
   isDefault: boolean;
   downmix: boolean;
+  downmixFilter?: string;
   audioParams: string[];
   manifest: StreamManifest;
   job: Job<IVideoData>;
@@ -41,6 +42,7 @@ export interface CreateAudioEncodingArgsOptions {
   codec: number;
   channels: number;
   downmix: boolean;
+  downmixFilter?: string;
   audioIndex: number;
   outputFileName: string;
 }

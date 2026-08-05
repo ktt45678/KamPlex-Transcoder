@@ -24,7 +24,8 @@ export class MediaInfoHelper {
   getMediaInfo(input: string, mediainfoDir: string) {
     const args: string[] = [
       `"${input}"`,
-      '--output=JSON'
+      '--output=JSON',
+      '--Ssl_IgnoreSecurity=1'
     ];
     return new Promise<MediaInfoResult>((resolve, reject) => {
       const mediainfo = child_process.spawn(`"${mediainfoDir}/mediainfo"`, args, { shell: true });
@@ -43,7 +44,11 @@ export class MediaInfoHelper {
         if (code !== 0) {
           reject({ code: code, message: errorMessage });
         } else {
-          const fileData = JSON.parse(infoJson);
+          const fileData: MediaInfoResult = JSON.parse(infoJson);
+          if (!fileData.media) {
+            reject({ code, message: errorMessage || `MediaInfo returned no media for ${input}` });
+            return;
+          }
           resolve(fileData);
         }
       });

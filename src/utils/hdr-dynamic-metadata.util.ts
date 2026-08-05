@@ -1,8 +1,8 @@
 import { stdout } from 'process';
-import child_process from 'child_process';
 import path from 'path';
 
 import { fileHelper } from './file-helper.util';
+import { ffmpegHelper, spawnUnshelled } from './ffmpeg-helper.util';
 import { HDRFormat, RejectCode } from '../enums';
 
 const HDR10PLUS_TOOL = 'hdr10plus_tool';
@@ -175,11 +175,6 @@ export interface SegmentHdr10PlusJsonOptions {
   logFn?: (message: string) => void;
 }
 
-function spawnUnshelled(dir: string, binaryName: string, args: string[]) {
-  const binary = process.platform === 'win32' ? `${binaryName}.exe` : binaryName;
-  return child_process.spawn(path.join(dir, binary), args);
-}
-
 export class HDRDynamicMetadataHelper {
   extractHdr10PlusJson(inputFile: string, outputFile: string, options: HDRDynamicMetadataOptions) {
     return this.runTool(HDR10PLUS_TOOL, ['--skip-validation', 'extract'], '-o', inputFile, outputFile, options);
@@ -260,10 +255,7 @@ export class HDRDynamicMetadataHelper {
     return new Promise<number[] | null>((resolve, reject) => {
       const args = ['-hide_banner', '-loglevel', 'error'];
       if (useURLInput) {
-        args.push(
-          '-reconnect', '1',
-          '-reconnect_on_http_error', '400,401,403,408,409,429,5xx',
-        );
+        args.push(...ffmpegHelper.urlInputArgs());
       }
       args.push(
         '-select_streams', 'v:0',
@@ -404,10 +396,7 @@ export class HDRDynamicMetadataHelper {
       '-hide_banner', '-loglevel', 'error'
     ];
     if (options.useURLInput) {
-      args.push(
-        '-reconnect', '1',
-        '-reconnect_on_http_error', '400,401,403,408,409,429,5xx',
-      );
+      args.push(...ffmpegHelper.urlInputArgs());
     }
     args.push(
       '-i', inputFile,

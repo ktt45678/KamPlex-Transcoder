@@ -8,7 +8,6 @@ import mongoose from 'mongoose';
 import { stdout } from 'process';
 import child_process from 'child_process';
 import path from 'path';
-import FFprobe from 'ffprobe-client';
 import { WINSTON_MODULE_PROVIDER } from 'nest-winston';
 import { Logger } from 'winston';
 
@@ -19,7 +18,7 @@ import { mediaModel } from '../../models/media.model';
 import { IVideoData, IJobData, IStorage, IEncodingSetting, MediaQueueResult, EncodeAudioOptions, EncodeVideoOptions, VideoSourceInfo, CreateAudioEncodingArgsOptions, CreateVideoEncodingArgsOptions, EncodeAudioByTrackOptions, AdvancedVideoSettings, ResolveVideoFiltersOptions, ValidateSourceQualityOptions, ReadSourceMetadataOptions, SourceMetadata } from './interfaces';
 import { AudioCodec, StatusCode, VideoCodec, RejectCode, TaskQueue, HDRTonemap, HDRFormat } from '../../enums';
 import { ENCODING_QUALITY, AUDIO_PARAMS, AUDIO_SURROUND_PARAMS, VIDEO_H264_PARAMS, VIDEO_H265_PARAMS, VIDEO_VP9_PARAMS, VIDEO_AV1_PARAMS, AUDIO_SPEED_PARAMS, AUDIO_SURROUND_OPUS_PARAMS, NEXT_GEN_ENCODING_QUALITY, SPLIT_SEGMENT_FOLDER, CONCAT_SEGMENT_FILE, CANCELED_JOBS_FILE, VIDEO_INPUT_PARAMS } from '../../config';
-import { HlsManifest, RcloneFile } from '../../common/interfaces';
+import { FFProbeResult, HlsManifest, RcloneFile } from '../../common/interfaces';
 import { KamplexApiService } from '../../common/modules/kamplex-api';
 import { TranscoderApiService } from '../../common/modules/transcoder-api';
 import {
@@ -27,7 +26,8 @@ import {
   MediaInfoResult, StringCrypto, stringHelper, StreamManifest, rcloneHelper, videoSourceHelper, isEqualShallow,
   HDRTransfer, hdrTonemapFilters, libplaceboTonemapFilters, ParsedHDRMetadataResult, pixelFormatForBitDepth,
   hdrDynamicMetadataHelper, ExtractedHDRDynamicMetadata, resolveHdr10PlusParamPath, planSegments,
-  LIBPLACEBO_HW_DEVICE_ARGS
+  buildDownmixPlan, buildDownmixFilter, computeDownmixGain, audioLoudnessHelper, LoudnessMeasurement,
+  LIBPLACEBO_HW_DEVICE_ARGS, parseSvtInfo, formatSvtInfoSummary
 } from '../../utils';
 import { Progress } from '../../common/entities';
 
@@ -55,6 +55,7 @@ export class VideoService implements OnModuleInit {
   private CanRetryEncoding: boolean;
   private TranscoderPriority: number;
   private thumbnailFolder: string;
+  private SuppressSvtConsole = false;
 
   constructor(@Inject(WINSTON_MODULE_PROVIDER) private readonly logger: Logger,
     @InjectQueue(TaskQueue.VIDEO_TRANSCODE_RESULT) private videoResultQueue: Queue<MediaQueueResult, any, JobNameType>,
@@ -211,16 +212,16 @@ export class VideoService implements OnModuleInit {
       }
     }
 
-    let videoInfo: FFprobe.FFProbeResult;
+    let videoInfo: FFProbeResult;
     let videoMIInfo: MediaInfoResult;
     try {
       if (!this.UseURLInput) {
         this.logger.info(`Processing input file: ${inputFile}`);
-        videoInfo = await FFprobe(inputFile, { path: `${ffmpegDir}/ffprobe` });
+        videoInfo = await ffmpegHelper.probeMedia(inputFile, ffmpegDir);
         videoMIInfo = await mediaInfoHelper.getMediaInfo(inputFile, mediainfoDir);
       } else {
         this.logger.info(`Processing input file: ${linkedInputUrl}`);
-        videoInfo = await FFprobe(linkedInputUrl, { path: `${ffmpegDir}/ffprobe` });
+        videoInfo = await ffmpegHelper.probeMedia(linkedInputUrl, ffmpegDir, true);
         videoMIInfo = await mediaInfoHelper.getMediaInfo(linkedInputUrl, mediainfoDir);
       }
     } catch (e) {
@@ -379,7 +380,7 @@ export class VideoService implements OnModuleInit {
         let hdrParams: ParsedHDRMetadataResult | null = null;
         if (isHDRVideo) {
           try {
-            hdrParams = await hdrMetadataHelper.getHdrMetadata(linkedInputUrl || inputFile, 0, ffmpegDir, this.logger);
+            hdrParams = await hdrMetadataHelper.getHdrMetadata(linkedInputUrl || inputFile, 0, ffmpegDir, this.logger, !!linkedInputUrl);
           } catch (e) {
             this.logger.warning(`Failed to read HDR metadata: ${e.message}`);
           }
@@ -687,9 +688,37 @@ export class VideoService implements OnModuleInit {
     const audioDuration = audioTrack.duration ? Math.trunc(+audioTrack.duration) : 0;
     const audioChannels = audioTrack.channels || (type === 'normal' ? 2 : 0);
     const audioTitle = audioTrack.tags?.title || null;
+    let downmixFilter: string | undefined;
+    if (downmix) {
+      const plan = buildDownmixPlan(audioTrack.channel_layout, audioChannels);
+      if (!plan.supported)
+        this.logger.warning(`Downmix layout '${plan.layout}' has unmapped channels: ${plan.unmappedChannels.join(', ')}, skipping deterministic matrix in favour of automatic stereo fold`);
+      let measurement: LoudnessMeasurement | null = null;
+      this.setTranscoderPriority(1);
+      try {
+        measurement = await audioLoudnessHelper.measureDownmix({
+          inputFile: inputFileUrl || inputFile,
+          audioStreamIndex: audioTrack.index,
+          matrix: plan.matrix,
+          ffmpegDir: this.configService.get<string>('FFMPEG_DIR'),
+          useURLInput: this.UseURLInput,
+          onCancel: (stop) => this.createCancelJobChecker(job.id, stop),
+          logFn: (message) => { this.logger.info(message) }
+        });
+      } catch (e) {
+        if (e === RejectCode.JOB_CANCEL)
+          throw e;
+        this.logger.warning(`Failed to measure downmix loudness: ${e.message}`);
+      } finally {
+        this.setTranscoderPriority(0);
+      }
+      const gain = computeDownmixGain(measurement);
+      downmixFilter = buildDownmixFilter(plan, gain);
+      this.logger.info(`Downmix layout: ${plan.layout}, source I: ${measurement?.sourceI ?? 'n/a'}, downmix I: ${measurement?.downmixI ?? 'n/a'}, downmix TP: ${measurement?.downmixTP ?? 'n/a'}, gain: ${gain}dB`);
+    }
     await this.encodeAudio({
       inputFile, parsedInput, inputFileUrl, sourceInfo: { duration: audioDuration, channels: audioChannels, language, title: audioTitle },
-      audioTrackIndex: audioTrack.index, codec: aacType, isDefault, downmix, audioParams: audioAACParams,
+      audioTrackIndex: audioTrack.index, codec: aacType, isDefault, downmix, downmixFilter, audioParams: audioAACParams,
       manifest, job
     });
     // Only encode opus surround if the source audio has 5 (4.1), 6 (5.1), 7 (6.1) or 8 (7.1) channels
@@ -697,14 +726,14 @@ export class VideoService implements OnModuleInit {
       this.logger.info('Audio codec: OPUS');
       await this.encodeAudio({
         inputFile, parsedInput, inputFileUrl, sourceInfo: { duration: audioDuration, channels: audioChannels, language, title: audioTitle },
-        audioTrackIndex: audioTrack.index, codec: opusType, isDefault: false, downmix, audioParams: audioOpusParams,
+        audioTrackIndex: audioTrack.index, codec: opusType, isDefault: false, downmix, downmixFilter, audioParams: audioOpusParams,
         manifest, job
       });
     }
   }
 
   private async encodeAudio(options: EncodeAudioOptions) {
-    const { inputFile, parsedInput, inputFileUrl, sourceInfo, audioTrackIndex, codec, isDefault, downmix, audioParams, manifest, job } = options;
+    const { inputFile, parsedInput, inputFileUrl, sourceInfo, audioTrackIndex, codec, isDefault, downmix, downmixFilter, audioParams, manifest, job } = options;
     const streamId = await createSnowFlakeId();
 
     const audioBaseName = `${parsedInput.name}_audio_${audioTrackIndex}`;
@@ -716,7 +745,7 @@ export class VideoService implements OnModuleInit {
 
     const audioArgs = this.createAudioEncodingArgs({
       inputFile: inputFileUrl || inputFile, parsedInput, audioParams, codec, channels: sourceInfo.channels,
-      downmix, audioIndex: audioTrackIndex, outputFileName: encodedAudioFileName
+      downmix, downmixFilter, audioIndex: audioTrackIndex, outputFileName: encodedAudioFileName
     });
 
     this.setTranscoderPriority(1);
@@ -725,7 +754,7 @@ export class VideoService implements OnModuleInit {
     this.setTranscoderPriority(0);
 
     this.logger.info(`Reading audio data: ${preparedAudioFileName}, ${mpdManifestFileName}, ${playlistFileName} and ${manifestFileName}`);
-    const audioInfo = await FFprobe(`${parsedInput.dir}/${preparedAudioFileName}`, { path: `${this.configService.get<string>('FFMPEG_DIR')}/ffprobe` });
+    const audioInfo = await ffmpegHelper.probeMedia(`${parsedInput.dir}/${preparedAudioFileName}`, this.configService.get<string>('FFMPEG_DIR'));
     const audioTrack = audioInfo.streams.find(s => s.codec_type === 'audio');
     const audioMIInfo = await mediaInfoHelper.getMediaInfo(`${parsedInput.dir}/${preparedAudioFileName}`,
       this.configService.get<string>('MEDIAINFO_DIR'));
@@ -769,6 +798,7 @@ export class VideoService implements OnModuleInit {
       inputFile, parsedInput, inputFileUrl, sourceInfo, qualityList, encodingSettings, advancedSettings = {}, codec, videoParams,
       manifest, job
     } = options;
+    this.SuppressSvtConsole = false;
     // Merge default encoding settings with override settings
     if (advancedSettings.overrideSettings) {
       advancedSettings.overrideSettings.forEach(os => {
@@ -886,6 +916,7 @@ export class VideoService implements OnModuleInit {
 
   private async splitAndEncodeVideo(options: EncodeVideoOptions, quality: number, perQualitySettings: IEncodingSetting, segmentDuration: number = 30, outputFileName: string) {
     const { inputFile, parsedInput, inputFileUrl, sourceInfo, advancedSettings = {}, codec, videoParams, job } = options;
+    this.SuppressSvtConsole = false;
     const segmentFolder = `${parsedInput.dir}/${SPLIT_SEGMENT_FOLDER}`;
     const concatSegmentFile = `${segmentFolder}/${CONCAT_SEGMENT_FILE}`;
     const segments = planSegments(sourceInfo.duration, segmentDuration, sourceInfo.frameIndex);
@@ -1082,7 +1113,7 @@ export class VideoService implements OnModuleInit {
   }
 
   private createAudioEncodingArgs(options: CreateAudioEncodingArgsOptions) {
-    const { inputFile, parsedInput, audioParams, codec, channels, downmix, audioIndex, outputFileName } = options;
+    const { inputFile, parsedInput, audioParams, codec, channels, downmix, downmixFilter, audioIndex, outputFileName } = options;
     const bitrate = AudioCodec.OPUS === codec ? 128 : AudioCodec.OPUS_SURROUND === codec ? 64 * channels : 0;
     const args: string[] = [
       '-hide_banner', '-y',
@@ -1092,29 +1123,23 @@ export class VideoService implements OnModuleInit {
       '-vn'
     ];
     if (this.UseURLInput) {
-      args.push(
-        '-reconnect', '1',
-        '-reconnect_on_http_error', '400,401,403,408,409,429,5xx',
-      );
+      args.push(...ffmpegHelper.urlInputArgs());
     }
     if (bitrate > 0) {
       args.push('-b:a', `${bitrate}K`);
     }
     args.push(...audioParams);
     if (downmix) {
-      if (codec === AudioCodec.AAC) {
-        args.push(
-          '-af',
-          '"lowpass=c=LFE:f=120,pan=stereo|FL=.3FL+.21FC+.3FLC+.21SL+.21BL+.15BC+.21LFE|FR=.3FR+.21FC+.3FRC+.21SR+.21BR+.15BC+.21LFE,volume=1.6"'
-        );
-      }
-      else if (codec === AudioCodec.OPUS) {
+      if (downmixFilter)
+        args.push('-af', `"${downmixFilter}"`);
+      else
         args.push('-ac', '2');
-        args.push('-mapping_family', '0');
-      }
     } else if (channels > 2) {
-      const channelValue = channels <= 8 ? channels.toString() : '8'; // 8 channels (7.1) is the limit for both aac and opus
-      args.push('-ac', channelValue);
+      if (channels >= 8) {
+        args.push('-ch_layout', '7.1');
+      } else {
+        args.push('-ac', channels.toString());
+      }
       if (codec === AudioCodec.OPUS_SURROUND) {
         args.push('-mapping_family', '1');
       }
@@ -1151,10 +1176,7 @@ export class VideoService implements OnModuleInit {
       '-loglevel', 'error'
     ];
     if (this.UseURLInput) {
-      args.push(
-        '-reconnect', '1',
-        '-reconnect_on_http_error', '400,401,403,408,409,429,5xx',
-      );
+      args.push(...ffmpegHelper.urlInputArgs());
     }
     splitFrom && args.push('-ss', splitFrom);
     args.push('-i', `"${inputFile}"`);;
@@ -1171,9 +1193,9 @@ export class VideoService implements OnModuleInit {
     if (codec === VideoCodec.H264)
       this.resolveH264Params(args, advancedSettings, quality, sourceInfo);
     else if (codec === VideoCodec.H265)
-      this.resolveH265Params(args, sourceInfo, encodingSetting, hdr10PlusJsonFile);
+      this.resolveH265Params(args, sourceInfo, advancedSettings, encodingSetting, hdr10PlusJsonFile);
     else if (codec === VideoCodec.AV1)
-      this.resolveSVTAV1Params(args, sourceInfo, hdr10PlusJsonFile);
+      this.resolveSVTAV1Params(args, sourceInfo, advancedSettings, hdr10PlusJsonFile);
     args.push(
       '-map', '0:v:0',
       //'-map_metadata', '-1',
@@ -1200,10 +1222,7 @@ export class VideoService implements OnModuleInit {
         '-loglevel', 'error'
       ];
       if (this.UseURLInput) {
-        args.push(
-          '-reconnect', '1',
-          '-reconnect_on_http_error', '400,401,403,408,409,429,5xx',
-        );
+        args.push(...ffmpegHelper.urlInputArgs());
       }
       splitFrom && args.push('-ss', splitFrom);
       args.push('-i', `"${inputFile}"`);
@@ -1219,9 +1238,9 @@ export class VideoService implements OnModuleInit {
       if (codec === VideoCodec.H264)
         this.resolveH264Params(args, advancedSettings, quality, sourceInfo);
       else if (codec === VideoCodec.H265)
-        this.resolveH265Params(args, sourceInfo, encodingSetting, hdr10PlusJsonFile);
+        this.resolveH265Params(args, sourceInfo, advancedSettings, encodingSetting, hdr10PlusJsonFile);
       else if (codec === VideoCodec.AV1)
-        this.resolveSVTAV1Params(args, sourceInfo, hdr10PlusJsonFile);
+        this.resolveSVTAV1Params(args, sourceInfo, advancedSettings, hdr10PlusJsonFile);
       args.push(
         '-map', '0:v:0',
         '-vf', videoFilters,
@@ -1245,10 +1264,7 @@ export class VideoService implements OnModuleInit {
       '-loglevel', 'error'
     ];
     if (this.UseURLInput) {
-      args.push(
-        '-reconnect', '1',
-        '-reconnect_on_http_error', '400,401,403,408,409,429,5xx',
-      );
+      args.push(...ffmpegHelper.urlInputArgs());
     }
     splitFrom && args.push('-ss', splitFrom);
     args.push('-i', `"${inputFile}"`);
@@ -1265,9 +1281,9 @@ export class VideoService implements OnModuleInit {
     if (codec === VideoCodec.H264)
       this.resolveH264Params(args, advancedSettings, quality, sourceInfo);
     else if (codec === VideoCodec.H265)
-      this.resolveH265Params(args, sourceInfo, encodingSetting, hdr10PlusJsonFile);
+      this.resolveH265Params(args, sourceInfo, advancedSettings, encodingSetting, hdr10PlusJsonFile);
     else if (codec === VideoCodec.AV1)
-      this.resolveSVTAV1Params(args, sourceInfo, hdr10PlusJsonFile);
+      this.resolveSVTAV1Params(args, sourceInfo, advancedSettings, hdr10PlusJsonFile);
     args.push(
       '-map', '0:v:0',
       //'-map_metadata', '-1',
@@ -1326,8 +1342,10 @@ export class VideoService implements OnModuleInit {
     }
   }
 
-  private resolveH265Params(args: string[], sourceInfo: VideoSourceInfo, encodingSetting?: IEncodingSetting,
-    hdr10PlusJsonFile?: string | null) {
+  private resolveH265Params(args: string[], sourceInfo: VideoSourceInfo, advancedSettings: AdvancedVideoSettings,
+    encodingSetting?: IEncodingSetting, hdr10PlusJsonFile?: string | null) {
+    if (advancedSettings.h264Tune === 'grain')
+      args.push('-tune', 'grain');
     if (!sourceInfo.hdrParams)
       return;
     args.push(...sourceInfo.hdrParams.ffmpegParams);
@@ -1347,19 +1365,31 @@ export class VideoService implements OnModuleInit {
     }
   }
 
-  private resolveSVTAV1Params(args: string[], sourceInfo: VideoSourceInfo, hdr10PlusJsonFile?: string | null) {
+  private resolveSVTAV1Params(args: string[], sourceInfo: VideoSourceInfo, advancedSettings: AdvancedVideoSettings,
+    hdr10PlusJsonFile?: string | null) {
     const svtAv1Preset = this.configService.get<string>('SVT_AV1_PRESET');
+    const svtAv1PsyDefaults = [
+      'ac-bias=0.25', 'sharp-tx=0', 'qm-min=2', 'chroma-qm-min=4', 'tf-strength=1', 'qp-scale-compress-strength=1',
+      'enable-variance-boost=1', 'variance-boost-strength=1', 'variance-octile=4', 'sharpness=1'
+    ];
     const svtAV1PresetParams = {
       main: [
         'enable-overlays=1', 'film-grain=0', 'film-grain-denoise=0', 'scd=1', 'sharpness=0', 'enable-qm=1', 'qm-min=0',
         'enable-variance-boost=1',
       ],
-      tritium: ['sharpness=0'],
-      hdr: ['sharpness=0']
+      tritium: [...svtAv1PsyDefaults],
+      hdr: [...svtAv1PsyDefaults]
     };
-    const svtAV1Params = svtAv1Preset === 'tritium' ? svtAV1PresetParams.tritium :
-      svtAv1Preset === 'hdr' ? svtAV1PresetParams.hdr : svtAV1PresetParams.main;
-    svtAV1Params.push('tune=0');
+    const isGrainTune = advancedSettings.h264Tune === 'grain';
+    const isPsyFork = svtAv1Preset === 'tritium' || svtAv1Preset === 'hdr';
+    let svtAV1Params: string[];
+    if (isGrainTune && isPsyFork) {
+      svtAV1Params = ['tune=5'];
+    } else {
+      svtAV1Params = svtAv1Preset === 'tritium' ? svtAV1PresetParams.tritium :
+        svtAv1Preset === 'hdr' ? svtAV1PresetParams.hdr : svtAV1PresetParams.main;
+      svtAV1Params.push('tune=0');
+    }
     if (sourceInfo.hdrParams) {
       args.push(...sourceInfo.hdrParams.ffmpegParams);
       svtAV1Params.push(sourceInfo.hdrParams.libsvtav1Params);
@@ -1369,7 +1399,7 @@ export class VideoService implements OnModuleInit {
       if (hdr10PlusParamPath)
         svtAV1Params.push(`hdr10plus-json=${hdr10PlusParamPath}`);
     } else {
-      svtAV1Params.push('luminance-qp-bias=30');
+      svtAV1Params.push(svtAv1Preset === 'main' ? 'luminance-qp-bias=30' : 'luminance-qp-bias=10');
     }
     const gopSize = Math.round(sourceInfo.fps ? sourceInfo.fps * 2 : 48).toString();
     svtAV1Params.push(`keyint=${gopSize}`);
@@ -1477,9 +1507,31 @@ export class VideoService implements OnModuleInit {
         stdout.write(`${ffmpegHelper.getProgressMessage(progress, percent)}\r`);
       });
 
+      let stderrLineBuf: string[] = [];
+      let svtLines: string[] = [];
+
+      const flushSvtBanner = () => {
+        if (!svtLines.length || this.SuppressSvtConsole) return;
+        this.logger.info('SVT-AV1 Encoder:\n' + svtLines.join('\n'), { _hideFromConsole: true });
+        const summary = formatSvtInfoSummary(parseSvtInfo(svtLines));
+        if (summary) stdout.write(summary + '\n');
+        this.SuppressSvtConsole = true;
+        svtLines = [];
+      };
+
       ffmpeg.stderr.setEncoding('utf8');
-      ffmpeg.stderr.on('data', (data) => {
-        stdout.write(data);
+      ffmpeg.stderr.on('data', (data: string) => {
+        const parts = ((stderrLineBuf.pop() ?? '') + data).split('\n');
+        const partial = parts.pop()!;
+        for (const line of parts) {
+          if (!this.SuppressSvtConsole && line.startsWith('Svt[info]:')) {
+            svtLines.push(line);
+          } else {
+            flushSvtBanner();
+            stdout.write(line + '\n');
+          }
+        }
+        if (partial) stderrLineBuf.push(partial);
       });
 
       const cancelledJobChecker = this.createCancelJobChecker(jobId, () => {
@@ -1504,6 +1556,8 @@ export class VideoService implements OnModuleInit {
       });
 
       ffmpeg.on('exit', (code: number) => {
+        if (stderrLineBuf.length) stdout.write(stderrLineBuf.join('\n') + '\n');
+        flushSvtBanner();
         stdout.write('\n');
         cancelledJobChecker();
         clearInterval(retryEncodingChecker);
