@@ -3,6 +3,7 @@ import { Inject, Injectable } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { WINSTON_MODULE_PROVIDER } from 'nest-winston';
 import { firstValueFrom } from 'rxjs';
+import { AxiosResponse } from 'axios';
 import { Logger } from 'winston';
 
 @Injectable()
@@ -46,7 +47,7 @@ export class TranscoderApiService {
     }
   }
 
-  getTranscoderPriority() {
+  getTranscoderPriority(): Promise<AxiosResponse<{ priority: number }>> {
     return firstValueFrom(this.httpService.get<{ priority: number }>(`${this.apiUrl}/video/transcoder-priority`));
   }
 }

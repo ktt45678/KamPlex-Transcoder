@@ -29,6 +29,10 @@
 ## Installation
 
 ```bash
+# pnpm
+$ pnpm install
+
+# npm
 $ npm install
 ```
 
