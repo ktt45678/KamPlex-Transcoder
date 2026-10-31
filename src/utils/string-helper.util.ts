@@ -15,6 +15,10 @@ export class StringHelper {
     return name.substring(0, maxLength) + '.' + ext;
   }
 
+  splitArgs(value: string) {
+    return value.split(/\s+/).filter(Boolean);
+  }
+
   escapeRegExp(text: string) {
     return text.replace(/[-[\]{}()*+?.,\\^$|#\s]/g, '\\$&');
   }

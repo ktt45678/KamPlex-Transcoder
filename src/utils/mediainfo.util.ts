@@ -1,4 +1,4 @@
-import child_process from 'child_process';
+import { spawnUnshelled } from './ffmpeg-helper.util';
 
 import { stringHelper } from './string-helper.util';
 
@@ -23,12 +23,12 @@ export class MediaInfoHelper {
 
   getMediaInfo(input: string, mediainfoDir: string) {
     const args: string[] = [
-      `"${input}"`,
+      input,
       '--output=JSON',
       '--Ssl_IgnoreSecurity=1'
     ];
     return new Promise<MediaInfoResult>((resolve, reject) => {
-      const mediainfo = child_process.spawn(`"${mediainfoDir}/mediainfo"`, args, { shell: true });
+      const mediainfo = spawnUnshelled(mediainfoDir, 'mediainfo', args);
       let infoJson = '';
       let errorMessage = '';
       mediainfo.stdout.setEncoding('utf8');

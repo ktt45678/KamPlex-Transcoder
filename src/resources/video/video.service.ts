@@ -6,7 +6,6 @@ import { InjectQueue } from '@nestjs/bullmq';
 import { Job, Queue, UnrecoverableError } from 'bullmq';
 import mongoose from 'mongoose';
 import { stdout } from 'process';
-import child_process from 'child_process';
 import path from 'path';
 import { WINSTON_MODULE_PROVIDER } from 'nest-winston';
 import { Logger } from 'winston';
@@ -27,7 +26,7 @@ import {
   HDRTransfer, hdrTonemapFilters, libplaceboTonemapFilters, ParsedHDRMetadataResult, pixelFormatForBitDepth,
   hdrDynamicMetadataHelper, ExtractedHDRDynamicMetadata, resolveHdr10PlusParamPath, planSegments,
   buildDownmixPlan, buildDownmixFilter, computeDownmixGain, audioLoudnessHelper, LoudnessMeasurement,
-  LIBPLACEBO_HW_DEVICE_ARGS, parseSvtInfo, formatSvtInfoSummary
+  LIBPLACEBO_HW_DEVICE_ARGS, parseSvtInfo, formatSvtInfoSummary, spawnUnshelled
 } from '../../utils';
 import { Progress } from '../../common/entities';
 
@@ -62,21 +61,21 @@ export class VideoService implements OnModuleInit {
     private configService: ConfigService, private kamplexApiService: KamplexApiService,
     private transcoderApiService: TranscoderApiService) {
     const audioParams = this.configService.get<string>('AUDIO_PARAMS');
-    this.AudioParams = audioParams ? audioParams.split(' ') : AUDIO_PARAMS;
+    this.AudioParams = audioParams ? stringHelper.splitArgs(audioParams) : AUDIO_PARAMS;
     const audioSpeedParams = this.configService.get<string>('AUDIO_SPEED_PARAMS');
-    this.AudioSpeedParams = audioSpeedParams ? audioSpeedParams.split(' ') : AUDIO_SPEED_PARAMS;
+    this.AudioSpeedParams = audioSpeedParams ? stringHelper.splitArgs(audioSpeedParams) : AUDIO_SPEED_PARAMS;
     const audioSurroundParams = this.configService.get<string>('AUDIO_SURROUND_PARAMS');
-    this.AudioSurroundParams = audioSurroundParams ? audioSurroundParams.split(' ') : AUDIO_SURROUND_PARAMS;
+    this.AudioSurroundParams = audioSurroundParams ? stringHelper.splitArgs(audioSurroundParams) : AUDIO_SURROUND_PARAMS;
     const audioSurroundOpusParams = this.configService.get<string>('AUDIO_SURROUND_OPUS_PARAMS');
-    this.AudioSurroundOpusParams = audioSurroundOpusParams ? audioSurroundOpusParams.split(' ') : AUDIO_SURROUND_OPUS_PARAMS;
+    this.AudioSurroundOpusParams = audioSurroundOpusParams ? stringHelper.splitArgs(audioSurroundOpusParams) : AUDIO_SURROUND_OPUS_PARAMS;
     const videoH264Params = this.configService.get<string>('VIDEO_H264_PARAMS');
-    this.VideoH264Params = videoH264Params ? videoH264Params.split(' ') : VIDEO_H264_PARAMS;
+    this.VideoH264Params = videoH264Params ? stringHelper.splitArgs(videoH264Params) : VIDEO_H264_PARAMS;
     const videoH265Params = this.configService.get<string>('VIDEO_H265_PARAMS');
-    this.VideoH265Params = videoH265Params ? videoH265Params.split(' ') : VIDEO_H265_PARAMS;
+    this.VideoH265Params = videoH265Params ? stringHelper.splitArgs(videoH265Params) : VIDEO_H265_PARAMS;
     const videoVP9Params = this.configService.get<string>('VIDEO_VP9_PARAMS');
-    this.VideoVP9Params = videoVP9Params ? videoVP9Params.split(' ') : VIDEO_VP9_PARAMS;
+    this.VideoVP9Params = videoVP9Params ? stringHelper.splitArgs(videoVP9Params) : VIDEO_VP9_PARAMS;
     const videoAV1Params = this.configService.get<string>('VIDEO_AV1_PARAMS');
-    this.VideoAV1Params = videoAV1Params ? videoAV1Params.split(' ') : VIDEO_AV1_PARAMS;
+    this.VideoAV1Params = videoAV1Params ? stringHelper.splitArgs(videoAV1Params) : VIDEO_AV1_PARAMS;
     const videoInputParams = this.configService.get<string>('VIDEO_INPUT_PARAMS');
     this.VideoInputParams = videoInputParams !== undefined
       ? (videoInputParams.trim() ? videoInputParams.trim().split(/\s+/) : [])
@@ -107,6 +106,8 @@ export class VideoService implements OnModuleInit {
   }
 
   async transcode(job: Job<IVideoData>, codec: number = 1) {
+    // A job that failed mid segment leaves the flags set
+    this.resetRetryEncoding();
     const jobIdStr = String(job.id);
     if (this.CanceledJobIds.has(jobIdStr)) {
       this.CanceledJobIds.delete(jobIdStr);
@@ -121,14 +122,14 @@ export class VideoService implements OnModuleInit {
     const mediaInfo = await mediaModel.findOne({ _id: BigInt(job.data.media) }, { _id: 1, originalLang: 1 }).lean().exec();
     const streamStorage = await externalStorageModel.findOne({ _id: BigInt(job.data.storage) }, { _id: 1, folderId: 1, publicUrl: 1 }).lean().exec();
 
-    const audioParams = appSettings.audioParams ? appSettings.audioParams.split(' ') : this.AudioParams;
-    const audioSpeedParams = appSettings.audioSpeedParams ? appSettings.audioSpeedParams.split(' ') : this.AudioSpeedParams;
-    const audioSurroundParams = appSettings.audioSurroundParams ? appSettings.audioSurroundParams.split(' ') : this.AudioSurroundParams;
-    const audioSurroundOpusParams = appSettings.audioSurroundOpusParams ? appSettings.audioSurroundOpusParams.split(' ') : this.AudioSurroundOpusParams;
-    const videoH264Params = appSettings.videoH264Params ? appSettings.videoH264Params.split(' ') : this.VideoH264Params;
-    const videoH265Params = appSettings.videoH265Params ? appSettings.videoH265Params.split(' ') : this.VideoH265Params;
-    const videoVP9Params = appSettings.videoVP9Params ? appSettings.videoVP9Params.split(' ') : this.VideoVP9Params;
-    const videoAV1Params = appSettings.videoAV1Params ? appSettings.videoAV1Params.split(' ') : this.VideoAV1Params;
+    const audioParams = appSettings.audioParams ? stringHelper.splitArgs(appSettings.audioParams) : this.AudioParams;
+    const audioSpeedParams = appSettings.audioSpeedParams ? stringHelper.splitArgs(appSettings.audioSpeedParams) : this.AudioSpeedParams;
+    const audioSurroundParams = appSettings.audioSurroundParams ? stringHelper.splitArgs(appSettings.audioSurroundParams) : this.AudioSurroundParams;
+    const audioSurroundOpusParams = appSettings.audioSurroundOpusParams ? stringHelper.splitArgs(appSettings.audioSurroundOpusParams) : this.AudioSurroundOpusParams;
+    const videoH264Params = appSettings.videoH264Params ? stringHelper.splitArgs(appSettings.videoH264Params) : this.VideoH264Params;
+    const videoH265Params = appSettings.videoH265Params ? stringHelper.splitArgs(appSettings.videoH265Params) : this.VideoH265Params;
+    const videoVP9Params = appSettings.videoVP9Params ? stringHelper.splitArgs(appSettings.videoVP9Params) : this.VideoVP9Params;
+    const videoAV1Params = appSettings.videoAV1Params ? stringHelper.splitArgs(appSettings.videoAV1Params) : this.VideoAV1Params;
     const qualityList = VideoCodec.H264 === codec ?
       (Array.isArray(appSettings.videoQualityList) && appSettings.videoQualityList.length ? appSettings.videoQualityList : ENCODING_QUALITY) :
       (Array.isArray(appSettings.videoNextGenQualityList) && appSettings.videoNextGenQualityList.length ? appSettings.videoNextGenQualityList : NEXT_GEN_ENCODING_QUALITY);
@@ -563,8 +564,17 @@ export class VideoService implements OnModuleInit {
     }
   }
 
+  // Only a split segment can be retried, a request at any other time is refused so it cannot hit a later encode
   setRetryEncoding() {
+    if (!this.CanRetryEncoding)
+      return false;
     this.RetryEncoding = true;
+    return true;
+  }
+
+  private resetRetryEncoding() {
+    this.CanRetryEncoding = false;
+    this.RetryEncoding = false;
   }
 
   getTranscoderPriority() {
@@ -1021,7 +1031,7 @@ export class VideoService implements OnModuleInit {
             throw e;
           }
         }
-        this.CanRetryEncoding = false;
+        this.resetRetryEncoding();
         break;
       }
 
@@ -1119,7 +1129,7 @@ export class VideoService implements OnModuleInit {
       '-hide_banner', '-y',
       '-progress', 'pipe:1',
       '-loglevel', 'error',
-      '-i', `"${inputFile}"`,
+      '-i', inputFile,
       '-vn'
     ];
     if (this.UseURLInput) {
@@ -1131,7 +1141,7 @@ export class VideoService implements OnModuleInit {
     args.push(...audioParams);
     if (downmix) {
       if (downmixFilter)
-        args.push('-af', `"${downmixFilter}"`);
+        args.push('-af', downmixFilter);
       else
         args.push('-ac', '2');
     } else if (channels > 2) {
@@ -1149,7 +1159,7 @@ export class VideoService implements OnModuleInit {
       //'-map_metadata', '-1',
       '-map_chapters', '-1',
       '-f', 'mp4',
-      `"${parsedInput.dir}/${outputFileName}"`
+      `${parsedInput.dir}/${outputFileName}`
     );
     return args;
   }
@@ -1179,7 +1189,7 @@ export class VideoService implements OnModuleInit {
       args.push(...ffmpegHelper.urlInputArgs());
     }
     splitFrom && args.push('-ss', splitFrom);
-    args.push('-i', `"${inputFile}"`);;
+    args.push('-i', inputFile);;
     if (splitFrames) args.push('-frames:v', splitFrames.toString());
     else splitDuration && args.push('-t', splitDuration);
     args.push(
@@ -1202,7 +1212,7 @@ export class VideoService implements OnModuleInit {
       '-map_chapters', '-1',
       '-vf', videoFilters,
       //'-movflags', '+faststart',
-      `"${parsedInput.dir}/${outputFileName}"`
+      `${parsedInput.dir}/${outputFileName}`
     );
     return args;
   }
@@ -1225,7 +1235,7 @@ export class VideoService implements OnModuleInit {
         args.push(...ffmpegHelper.urlInputArgs());
       }
       splitFrom && args.push('-ss', splitFrom);
-      args.push('-i', `"${inputFile}"`);
+      args.push('-i', inputFile);
       if (splitFrames) args.push('-frames:v', splitFrames.toString());
       else splitDuration && args.push('-t', splitDuration);
       args.push(...videoParams,
@@ -1247,9 +1257,9 @@ export class VideoService implements OnModuleInit {
         //'-movflags', '+faststart'
       );
       if (segmentIndex != null) {
-        args.push('-passlogfile', `"${parsedInput.dir}/${SPLIT_SEGMENT_FOLDER}/${parsedInput.name}_2pass.log"`);
+        args.push('-passlogfile', `${parsedInput.dir}/${SPLIT_SEGMENT_FOLDER}/${parsedInput.name}_2pass.log`);
       } else {
-        args.push('-passlogfile', `"${parsedInput.dir}/${parsedInput.name}_2pass.log"`);
+        args.push('-passlogfile', `${parsedInput.dir}/${parsedInput.name}_2pass.log`);
       }
       args.push(
         '-pass', '1', '-an',
@@ -1267,7 +1277,7 @@ export class VideoService implements OnModuleInit {
       args.push(...ffmpegHelper.urlInputArgs());
     }
     splitFrom && args.push('-ss', splitFrom);
-    args.push('-i', `"${inputFile}"`);
+    args.push('-i', inputFile);
     if (splitFrames) args.push('-frames:v', splitFrames.toString());
     else splitDuration && args.push('-t', splitDuration);
     args.push(
@@ -1292,13 +1302,13 @@ export class VideoService implements OnModuleInit {
       //'-movflags', '+faststart'
     );
     if (segmentIndex != null) {
-      args.push('-passlogfile', `"${parsedInput.dir}/${SPLIT_SEGMENT_FOLDER}/${parsedInput.name}_2pass.log"`);
+      args.push('-passlogfile', `${parsedInput.dir}/${SPLIT_SEGMENT_FOLDER}/${parsedInput.name}_2pass.log`);
     } else {
-      args.push('-passlogfile', `"${parsedInput.dir}/${parsedInput.name}_2pass.log"`);
+      args.push('-passlogfile', `${parsedInput.dir}/${parsedInput.name}_2pass.log`);
     }
     args.push(
       '-pass', '2',
-      `"${parsedInput.dir}/${outputFileName}"`
+      `${parsedInput.dir}/${outputFileName}`
     );
     return args;
   }
@@ -1338,7 +1348,7 @@ export class VideoService implements OnModuleInit {
     }
     if (sourceInfo.sourceH264Params) {
       const x264Params = mediaInfoHelper.createH264Params(sourceInfo.sourceH264Params, sourceInfo.height === quality);
-      args.push('-x264-params', `"${x264Params}"`);
+      args.push('-x264-params', x264Params);
     }
   }
 
@@ -1357,7 +1367,7 @@ export class VideoService implements OnModuleInit {
     if (hdr10PlusParamPath)
       x265Params.push(`dhdr10-info=${hdr10PlusParamPath}`);
     if (x265Params.length)
-      args.push('-x265-params', `"${x265Params.join(':')}"`);
+      args.push('-x265-params', x265Params.join(':'));
     if ((sourceInfo.hdrParams.hdrFormat & HDRFormat.DOLBY_VISION) && !encodingSetting?.maxrate) {
       const fallbackMaxrate = sourceInfo.bitrate > 0 ? sourceInfo.bitrate : 20000;
       this.logger.info(`Dolby Vision requires VBV, applying a ${fallbackMaxrate}K rate cap`);
@@ -1403,7 +1413,7 @@ export class VideoService implements OnModuleInit {
     }
     const gopSize = Math.round(sourceInfo.fps ? sourceInfo.fps * 2 : 48).toString();
     svtAV1Params.push(`keyint=${gopSize}`);
-    args.push('-svtav1-params', `"${svtAV1Params.join(':')}"`);
+    args.push('-svtav1-params', svtAV1Params.join(':'));
   }
 
   private resolveVideoFilters(options: ResolveVideoFiltersOptions) {
@@ -1438,21 +1448,21 @@ export class VideoService implements OnModuleInit {
       '-loglevel', 'error',
       '-f', 'concat',
       '-safe', '0',
-      '-i', `"${inputFile}"`,
+      '-i', inputFile,
       '-c', 'copy',
-      `"${parsedInput.dir}/${outputFile}"`
+      `${parsedInput.dir}/${outputFile}`
     ];
     return args;
   }
 
   private createMP4BoxPackArgs(input: string, parsedInput: path.ParsedPath, tempFileName: string, playlistName: string) {
-    const segmentInitName = process.platform === 'win32' ? '$Init=$' : '\\$Init=\\$';
     const args: string[] = [
       '-dash', '6000',
       '-profile', 'onDemand',
-      '-segment-name', `"${tempFileName}${segmentInitName}"`,
-      '-out', `"${parsedInput.dir}/${playlistName}:dual"`,
-      `"${input}"`
+      // MP4Box template, $Init=$ is passed as is now that no shell expands it
+      '-segment-name', `${tempFileName}$Init=$`,
+      '-out', `${parsedInput.dir}/${playlistName}:dual`,
+      input
     ];
     return args;
   }
@@ -1464,7 +1474,7 @@ export class VideoService implements OnModuleInit {
       '--low-level-retries', '5',
       '-v', '--use-json-log',
       '--stats', '3s',
-      'move', `"${source}"`, `"${dest}"`
+      'move', source, dest
     ];
     if (include) {
       args.push('--include', include);
@@ -1481,8 +1491,8 @@ export class VideoService implements OnModuleInit {
       '-v', '--use-json-log',
       '--stats', '3s',
       targetCommand,
-      `"${transcodeDir}/${this.thumbnailFolder}"`,
-      `"${remote}:${parentFolder}/${this.thumbnailFolder}"`
+      `${transcodeDir}/${this.thumbnailFolder}`,
+      `${remote}:${parentFolder}/${this.thumbnailFolder}`
     ];
     return args;
   }
@@ -1495,7 +1505,7 @@ export class VideoService implements OnModuleInit {
       let lastProgress: Progress | null = null;
 
       this.logger.info('ffmpeg ' + args.join(' '));
-      const ffmpeg = child_process.spawn(`"${this.configService.get<string>('FFMPEG_DIR')}/ffmpeg"`, args, { shell: true });
+      const ffmpeg = spawnUnshelled(this.configService.get<string>('FFMPEG_DIR'), 'ffmpeg', args);
 
       ffmpeg.stdout.setEncoding('utf8');
       ffmpeg.stdout.on('data', async (data: string) => {
@@ -1582,7 +1592,7 @@ export class VideoService implements OnModuleInit {
       let isCancelled = false;
 
       this.logger.info('MP4Box ' + args.join(' '));
-      const mp4box = child_process.spawn(`"${this.configService.get<string>('MP4BOX_DIR')}/MP4Box"`, args, { shell: true });
+      const mp4box = spawnUnshelled(this.configService.get<string>('MP4BOX_DIR'), 'MP4Box', args);
 
       mp4box.stderr.setEncoding('utf8');
       mp4box.stderr.on('data', (data) => {
@@ -1613,7 +1623,7 @@ export class VideoService implements OnModuleInit {
       let isCancelled = false;
 
       this.logger.info('rclone ' + args.join(' '));
-      const rclone = child_process.spawn(`"${this.configService.get<string>('RCLONE_DIR')}/rclone"`, args, { shell: true });
+      const rclone = spawnUnshelled(this.configService.get<string>('RCLONE_DIR'), 'rclone', args);
 
       rclone.stderr.setEncoding('utf8');
       rclone.stderr.on('data', (data) => {
@@ -1691,7 +1701,7 @@ export class VideoService implements OnModuleInit {
     return new Promise<RcloneFile[]>((resolve, reject) => {
       let isCancelled = false;
       this.logger.info('rclone ' + args.join(' '));
-      const rclone = child_process.spawn(`"${this.configService.get<string>('RCLONE_DIR')}/rclone"`, args, { shell: true });
+      const rclone = spawnUnshelled(this.configService.get<string>('RCLONE_DIR'), 'rclone', args);
 
       let listJson = '';
 
@@ -1756,7 +1766,7 @@ export class VideoService implements OnModuleInit {
     return externalStorage.publicUrl.replace(':service_path', 's3').replace(':path', sourcePath);
   }
 
-  private getLinkedSourceRemuxUrl(externalStorage: mongoose.FlattenMaps<IExternalStorage>, remuxPath: string, filename: string) {
+  private getLinkedSourceRemuxUrl(externalStorage: Pick<IExternalStorage, 'folderId' | 'publicUrl'>, remuxPath: string, filename: string) {
     if (!externalStorage.publicUrl)
       return null;
     const sourcePathItems = [externalStorage.folderId || '', remuxPath, filename];
@@ -1867,7 +1877,7 @@ export class VideoService implements OnModuleInit {
     return <HlsManifest>JSON.parse(manifestContent);
   }
 
-  private async decryptToken(storage: IStorage) {
+  private async decryptToken<T extends Pick<IStorage, 'clientSecret'>>(storage: T) {
     const stringCrypto = new StringCrypto(this.configService.get<string>('CRYPTO_SECRET_KEY'));
     storage.clientSecret = await stringCrypto.decrypt(storage.clientSecret);
     return storage;
@@ -1878,8 +1888,7 @@ export class VideoService implements OnModuleInit {
     const statusJson = JSON.stringify(status);
     this.logger.error(`Error: ${errorCode} - ${statusJson}`);
     await this.kamplexApiService.ensureProducerAppIsOnline(job.data.producerUrl);
-    if (options.discard)
-      job.discard();
+    // Callers that discard also throw UnrecoverableError, which stops BullMQ from retrying
     if (options.discard || job.attemptsMade >= job.opts.attempts)
       await this.videoResultQueue.add('failed-encoding', status);
     else if (job.attemptsMade < job.opts.attempts)

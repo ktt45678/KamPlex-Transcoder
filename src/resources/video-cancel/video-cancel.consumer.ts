@@ -16,7 +16,6 @@ export class VideoCancelConsumer extends WorkerHost {
 
   async process(job: Job<IJobData>) {
     this.videoService.addToCanceled(job.data);
-    job.discard();
     return { cancel: true };
   }
 

@@ -1,12 +1,12 @@
 import fs from 'fs';
 import path from 'path';
-import checkDiskSpace from 'check-disk-space';
 
 export class DiskSpaceUtil {
+  // Space available to this process, the same value check-disk-space reported as `free`
   async getFreeSpace(path: string) {
     try {
-      const { free } = await checkDiskSpace(path);
-      return free;
+      const { bavail, bsize } = await fs.promises.statfs(path);
+      return bavail * bsize;
     } catch {
       return 0;
     }

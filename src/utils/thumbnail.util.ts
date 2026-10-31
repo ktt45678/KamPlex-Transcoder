@@ -7,9 +7,8 @@ import { Logger } from 'winston';
 import sharp from 'sharp';
 import path from 'path';
 import fs from 'fs';
-import child_process from 'child_process';
 
-import { ffmpegHelper } from './ffmpeg-helper.util';
+import { ffmpegHelper, spawnUnshelled } from './ffmpeg-helper.util';
 import { hdrTonemapFilters, HDRTonemapSource } from './hdr-tonemap.util';
 import { HDRTransfer } from './mediainfo.util';
 import { RejectCode } from '../enums/reject-code.enum';
@@ -344,17 +343,17 @@ function generateThumbnails(inputFile: string, outputFolder: string, maxWidth: n
     }
 
     args.push(
-      '-i', `"${inputFile}"`,
-      '-vf', `"${videoFilters.join(',')}"`,
+      '-i', inputFile,
+      '-vf', videoFilters.join(','),
       '-qmin', '1',
       '-qscale:v', '1',
       '-f', 'image2',
-      `"${outputFolder}/thumb_%d.png"`
+      `${outputFolder}/thumb_%d.png`
     );
 
     let generatedFrames = 0;
 
-    const ffmpeg = child_process.spawn(`"${input.ffmpegDir}/ffmpeg"`, args, { shell: true });
+    const ffmpeg = spawnUnshelled(input.ffmpegDir, 'ffmpeg', args);
 
     ffmpeg.stdout.setEncoding('utf8');
     ffmpeg.stdout.on('data', async (data: string) => {

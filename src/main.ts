@@ -1,5 +1,6 @@
 import { NestFactory } from '@nestjs/core';
 import { FastifyAdapter, NestFastifyApplication } from '@nestjs/platform-fastify';
+import { LogController } from 'fastify';
 import { WINSTON_MODULE_NEST_PROVIDER } from 'nest-winston';
 
 import { AppModule } from './app.module';
@@ -9,7 +10,7 @@ import { mongooseHelper } from './utils';
 async function bootstrap() {
   const app = await NestFactory.create<NestFastifyApplication>(AppModule, new FastifyAdapter({
     logger: true,
-    disableRequestLogging: true
+    logController: new LogController({ disableRequestLogging: true })
   }));
   app.enableCors();
   app.useLogger(app.get(WINSTON_MODULE_NEST_PROVIDER));

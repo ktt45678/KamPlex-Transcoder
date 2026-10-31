@@ -1,6 +1,4 @@
-import child_process from 'child_process';
-
-import { ffmpegHelper } from './ffmpeg-helper.util';
+import { ffmpegHelper, spawnUnshelled } from './ffmpeg-helper.util';
 import { RejectCode } from '../enums';
 import { LoudnessMeasurement } from './audio-downmix.util';
 
@@ -57,17 +55,17 @@ export class AudioLoudnessHelper {
       if (useURLInput)
         args.push(...ffmpegHelper.urlInputArgs());
       args.push(
-        '-i', `"${inputFile}"`,
+        '-i', inputFile,
         '-filter_complex',
-        `"[0:${audioStreamIndex}]asplit=2[src][dm];` +
+        `[0:${audioStreamIndex}]asplit=2[src][dm];` +
         `[src]ebur128@src=peak=true:framelog=quiet[sm];` +
-        `[dm]${matrix},ebur128@dm=peak=true:framelog=quiet[dmm]"`,
-        '-map', '"[sm]"', '-f', 'null', '-',
-        '-map', '"[dmm]"', '-f', 'null', '-'
+        `[dm]${matrix},ebur128@dm=peak=true:framelog=quiet[dmm]`,
+        '-map', '[sm]', '-f', 'null', '-',
+        '-map', '[dmm]', '-f', 'null', '-'
       );
 
       logFn?.('ffmpeg ' + args.join(' '));
-      const ffmpeg = child_process.spawn(`"${ffmpegDir}/ffmpeg"`, args, { shell: true });
+      const ffmpeg = spawnUnshelled(ffmpegDir, 'ffmpeg', args);
 
       ffmpeg.stderr.setEncoding('utf8');
       ffmpeg.stderr.on('data', (data: string) => { stderrOutput += data; });

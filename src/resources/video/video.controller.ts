@@ -1,4 +1,4 @@
-import { Controller, Get, HttpCode, Post } from '@nestjs/common';
+import { Controller, Get, HttpCode, HttpException, HttpStatus, Post } from '@nestjs/common';
 import { RouteConfig } from '@nestjs/platform-fastify';
 
 import { BaseVideoConsumer } from './video.consumer';
@@ -14,7 +14,7 @@ export class VideoController {
   }
 
   @Post('resume')
-  resultWorker(): void {
+  resultWorker(): Promise<void> {
     return this.consumer.resumeWorker();
   }
 
@@ -26,7 +26,8 @@ export class VideoController {
   @Post('retry-encoding')
   @HttpCode(204)
   retryEncoding() {
-    this.videoService.setRetryEncoding();
+    if (!this.videoService.setRetryEncoding())
+      throw new HttpException({ message: 'No segment is being encoded' }, HttpStatus.CONFLICT);
   }
 
   @Get('transcoder-priority')

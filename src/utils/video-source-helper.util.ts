@@ -1,9 +1,10 @@
 import { stdout } from 'process';
 import child_process from 'child_process';
+import path from 'path';
 import chokidar from 'chokidar';
 
 import { fileHelper } from './file-helper.util';
-import { ffmpegHelper } from './ffmpeg-helper.util';
+import { ffmpegHelper, spawnUnshelled } from './ffmpeg-helper.util';
 import { RejectCode } from '../enums';
 
 export interface ConvertOptions {
@@ -52,7 +53,7 @@ export class VideoSourceHelper {
       }
 
       args.push(
-        '-i', `"${inputFile}"`,
+        '-i', inputFile,
         '-c', 'copy'
       );
 
@@ -63,10 +64,10 @@ export class VideoSourceHelper {
       args.push(
         '-f', 'fragment',
         '-reset_timestamps', '1',
-        `"${outputFolder}/${outputFile}_%03d.mkv"`
+        `${outputFolder}/${outputFile}_%03d.mkv`
       );
 
-      const ffmpeg = child_process.spawn(`"${options.ffmpegDir}/ffmpeg"`, args, { shell: true });
+      const ffmpeg = spawnUnshelled(options.ffmpegDir, 'ffmpeg', args);
       ffmpeg.stdout.setEncoding('utf8');
       ffmpeg.stdout.on('data', async (data: string) => {
         const progress = ffmpegHelper.parseProgress(data);
@@ -86,7 +87,10 @@ export class VideoSourceHelper {
         rclone?.kill('SIGINT');
       });
 
-      const watcher = chokidar.watch(`${outputFolder}/segment_*.mkv`, {
+      // chokidar 4+ has no globs: watch the folder itself and keep only segment_*.mkv files
+      const watcher = chokidar.watch(outputFolder, {
+        depth: 0,
+        ignored: (filePath, stats) => !!stats?.isFile() && !/^segment_.*\.mkv$/.test(path.basename(filePath)),
         persistent: true,
         awaitWriteFinish: {
           stabilityThreshold: 5000,
@@ -99,10 +103,10 @@ export class VideoSourceHelper {
           '--config', options.rcloneConfigFile,
           '--low-level-retries', '5',
           'move',
-          `"${filePath}"`,
-          `"${options.remote}:${options.remoteParentFolder}/${options.remoteFolder}"`
+          filePath,
+          `${options.remote}:${options.remoteParentFolder}/${options.remoteFolder}`
         ];
-        return child_process.spawn(`"${options.rcloneDir}/rclone"`, rcloneArgs, { shell: true });
+        return spawnUnshelled(options.rcloneDir, 'rclone', rcloneArgs);
       }
 
       watcher.on('add', (filePath) => {
@@ -120,7 +124,7 @@ export class VideoSourceHelper {
           reject({ code, message: `FFmpeg exited with status code: ${code}` });
         } else {
           stdout.write(`Uploading remaining segments\n`);
-          rclone = uploadSegment(`"${outputFolder}"`);
+          rclone = uploadSegment(outputFolder);
           rclone.on('exit', (code: number) => {
             cancelCleanup?.();
             if (isCancelled) {
@@ -152,7 +156,7 @@ export class VideoSourceHelper {
       }
 
       args.push(
-        '-i', `"${inputFile}"`,
+        '-i', inputFile,
         '-c:v', 'copy'
       );
 
@@ -164,10 +168,10 @@ export class VideoSourceHelper {
         args.push('-c:a', options.audioCodec);
       if (options.videoOnly)
         args.push('-map', '0:v:0');
-      args.push(`"${outputFile}"`);
+      args.push(outputFile);
 
       options.logFn && options.logFn('ffmpeg ' + args.join(' '));
-      const ffmpeg = child_process.spawn(`"${options.ffmpegDir}/ffmpeg"`, args, { shell: true });
+      const ffmpeg = spawnUnshelled(options.ffmpegDir, 'ffmpeg', args);
       ffmpeg.stdout.setEncoding('utf8');
       ffmpeg.stdout.on('data', async (data: string) => {
         const progress = ffmpegHelper.parseProgress(data);

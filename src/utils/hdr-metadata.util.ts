@@ -1,7 +1,6 @@
 import { Logger } from 'winston';
-import child_process from 'child_process';
 
-import { ffmpegHelper } from './ffmpeg-helper.util';
+import { ffmpegHelper, spawnUnshelled } from './ffmpeg-helper.util';
 import { HDRFormat } from '../enums';
 
 const x265ValidColorMatrix: string[] = [
@@ -344,11 +343,11 @@ export class HDRMetadataHelper {
       '-show_entries',
       'stream=codec_type:' +
       'frame=pix_fmt,color_space,color_primaries,color_transfer,side_data_list',
-      '-i', `"${inputFile}"`
+      '-i', inputFile
     );
 
     return new Promise<ParsedHDRMetadataResult | null>((resolve, reject) => {
-      const ffmpeg = child_process.spawn(`"${ffprobeDir}/ffprobe"`, args, { shell: true });
+      const ffmpeg = spawnUnshelled(ffprobeDir, 'ffprobe', args);
 
       let outputJson = '';
       ffmpeg.stdout.setEncoding('utf8');
