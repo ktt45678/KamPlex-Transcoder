@@ -49,6 +49,10 @@ export class FileHelper {
     return fs.promises.appendFile(filePath, content);
   }
 
+  writeFile(filePath: string, data: Buffer) {
+    return fs.promises.writeFile(filePath, data);
+  }
+
   writeAllText(filePath: string, content: string, options?: Parameters<typeof fs.promises.writeFile>[2]) {
     return fs.promises.writeFile(filePath, content, options);
   }

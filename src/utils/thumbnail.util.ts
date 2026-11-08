@@ -42,6 +42,9 @@ interface InputOptions {
 
   jobId: string | number;
 
+  /** Keep the extracted 1 fps frames for the caller, who must remove the returned framesPath. */
+  keepFrames?: boolean;
+
   onCancel?: (stop: () => void) => (() => void);
 
   logger?: Logger;
@@ -78,6 +81,9 @@ interface GeneratorOutput {
 
   /** An array of the generated sprites in WebP or JPEG format. */
   spritePaths: string[];
+
+  /** The folder of the 1 fps frames, only when keepFrames is set. Frame n is thumb_n.png at second n - 1. */
+  framesPath?: string;
 }
 
 interface ThumbnailFrame {
@@ -313,7 +319,10 @@ export async function generateSprites(options: InputOptions, generatorOptionsLis
 
   // Perform Clear up.
   //console.log(`Clearing away temporary output directory ${outputPath}`);
-  await rimraf(tempPath);
+  if (options.keepFrames)
+    output.framesPath = tempPath;
+  else
+    await rimraf(tempPath);
 
   return output;
 }
@@ -403,7 +412,7 @@ function generateThumbnails(inputFile: string, outputFolder: string, maxWidth: n
   });
 }
 
-async function createThumbhash(input: string | Buffer, srcWidth: number, srcHeight: number) {
+export async function createThumbhash(input: string | Buffer, srcWidth: number, srcHeight: number) {
   const scaledSizes = getScaledSizes(srcWidth, srcHeight, 100, 100);
   const rgba = await sharp(input).resize({ width: scaledSizes.width, height: scaledSizes.height }).ensureAlpha().raw().toBuffer();
   const thumbhash = rgbaToThumbHash(scaledSizes.width, scaledSizes.height, rgba);

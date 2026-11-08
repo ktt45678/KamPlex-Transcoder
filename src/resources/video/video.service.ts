@@ -9,16 +9,19 @@ import { stdout } from 'process';
 import path from 'path';
 import { WINSTON_MODULE_PROVIDER } from 'nest-winston';
 import { Logger } from 'winston';
+import { rimraf } from 'rimraf';
+import sharp from 'sharp';
 
 import { externalStorageModel, IExternalStorage } from '../../models/external-storage.model';
 import { mediaStorageModel } from '../../models/media-storage.model';
 import { settingModel } from '../../models/setting.model';
 import { mediaModel } from '../../models/media.model';
-import { IVideoData, IJobData, IStorage, IEncodingSetting, MediaQueueResult, EncodeAudioOptions, EncodeVideoOptions, VideoSourceInfo, CreateAudioEncodingArgsOptions, CreateVideoEncodingArgsOptions, EncodeAudioByTrackOptions, AdvancedVideoSettings, ResolveVideoFiltersOptions, ValidateSourceQualityOptions, ReadSourceMetadataOptions, SourceMetadata } from './interfaces';
+import { IVideoData, IJobData, IStorage, IEncodingSetting, MediaQueueResult, EncodeAudioOptions, EncodeVideoOptions, VideoSourceInfo, CreateAudioEncodingArgsOptions, CreateVideoEncodingArgsOptions, EncodeAudioByTrackOptions, AdvancedVideoSettings, ResolveVideoFiltersOptions, ValidateSourceQualityOptions, ReadSourceMetadataOptions, SourceMetadata, CreateStillImagesOptions, CreateThumbnailsOptions, StillImagesInput, StillImagesResult, StillImageFrame, StillImageThumb, RunStillOnlyOptions } from './interfaces';
 import { AudioCodec, StatusCode, VideoCodec, RejectCode, TaskQueue, HDRTonemap, HDRFormat } from '../../enums';
-import { ENCODING_QUALITY, AUDIO_PARAMS, AUDIO_SURROUND_PARAMS, VIDEO_H264_PARAMS, VIDEO_H265_PARAMS, VIDEO_VP9_PARAMS, VIDEO_AV1_PARAMS, AUDIO_SPEED_PARAMS, AUDIO_SURROUND_OPUS_PARAMS, NEXT_GEN_ENCODING_QUALITY, SPLIT_SEGMENT_FOLDER, CONCAT_SEGMENT_FILE, CANCELED_JOBS_FILE, VIDEO_INPUT_PARAMS } from '../../config';
+import { ENCODING_QUALITY, AUDIO_PARAMS, AUDIO_SURROUND_PARAMS, VIDEO_H264_PARAMS, VIDEO_H265_PARAMS, VIDEO_VP9_PARAMS, VIDEO_AV1_PARAMS, AUDIO_SPEED_PARAMS, AUDIO_SURROUND_OPUS_PARAMS, NEXT_GEN_ENCODING_QUALITY, SPLIT_SEGMENT_FOLDER, CONCAT_SEGMENT_FILE, CANCELED_JOBS_FILE, VIDEO_INPUT_PARAMS, STILL_IMAGE_FACE_MODEL_FILE, STILL_IMAGE_PROGRESS_FOLDER, STILL_IMAGE_FRAMES_FILE } from '../../config';
 import { FFProbeResult, HlsManifest, RcloneFile } from '../../common/interfaces';
 import { KamplexApiService } from '../../common/modules/kamplex-api';
+import { RedisPubSubService } from '../../common/modules/redis-pubsub';
 import { TranscoderApiService } from '../../common/modules/transcoder-api';
 import {
   createSnowFlakeId, diskSpaceUtil, ffmpegHelper, fileHelper, generateSprites, hdrMetadataHelper, mediaInfoHelper,
@@ -26,12 +29,13 @@ import {
   HDRTransfer, hdrTonemapFilters, libplaceboTonemapFilters, ParsedHDRMetadataResult, pixelFormatForBitDepth,
   hdrDynamicMetadataHelper, ExtractedHDRDynamicMetadata, resolveHdr10PlusParamPath, planSegments,
   buildDownmixPlan, buildDownmixFilter, computeDownmixGain, audioLoudnessHelper, LoudnessMeasurement,
-  LIBPLACEBO_HW_DEVICE_ARGS, parseSvtInfo, formatSvtInfoSummary, spawnUnshelled
+  LIBPLACEBO_HW_DEVICE_ARGS, parseSvtInfo, formatSvtInfoSummary, spawnUnshelled, FaceDetector, pickStillImageTimes, extractStillImage, createThumbhash,
+  STILL_IMAGE_MAIN_HEIGHT, STILL_IMAGE_PROGRESS_WIDTH
 } from '../../utils';
 import { Progress } from '../../common/entities';
 
 type JobNameType = 'update-source' | 'add-stream-video' | 'add-stream-audio' | 'add-stream-manifest' | 'finished-encoding' |
-  'cancelled-encoding' | 'retry-encoding' | 'failed-encoding';
+  'cancelled-encoding' | 'retry-encoding' | 'failed-encoding' | 'add-still-images' | 'set-still-image';
 
 @Injectable()
 export class VideoService implements OnModuleInit {
@@ -48,8 +52,9 @@ export class VideoService implements OnModuleInit {
   private UseURLInput: boolean;
   private SplitEncoding: boolean;
   private cancelEmitter = new EventEmitter();
-  private CanceledJobIds = new Set<string>();
+  private CanceledJobIds = new Map<string, number>();
   private canceledJobsFilePath: string;
+  private activeJob: { job: Job<IVideoData>, codec: number } | undefined;
   private RetryEncoding: boolean;
   private CanRetryEncoding: boolean;
   private TranscoderPriority: number;
@@ -59,7 +64,7 @@ export class VideoService implements OnModuleInit {
   constructor(@Inject(WINSTON_MODULE_PROVIDER) private readonly logger: Logger,
     @InjectQueue(TaskQueue.VIDEO_TRANSCODE_RESULT) private videoResultQueue: Queue<MediaQueueResult, any, JobNameType>,
     private configService: ConfigService, private kamplexApiService: KamplexApiService,
-    private transcoderApiService: TranscoderApiService) {
+    private transcoderApiService: TranscoderApiService, private redisPubSubService: RedisPubSubService) {
     const audioParams = this.configService.get<string>('AUDIO_PARAMS');
     this.AudioParams = audioParams ? stringHelper.splitArgs(audioParams) : AUDIO_PARAMS;
     const audioSpeedParams = this.configService.get<string>('AUDIO_SPEED_PARAMS');
@@ -92,13 +97,12 @@ export class VideoService implements OnModuleInit {
   }
 
   async onModuleInit() {
+    this.redisPubSubService.onReady(() => this.checkMissedCancel());
     try {
       const exists = await fileHelper.fileExists(this.canceledJobsFilePath);
       if (exists) {
         const data = await fileHelper.readAllText(this.canceledJobsFilePath, 'utf-8') as string;
-        const ids = JSON.parse(data);
-        if (Array.isArray(ids))
-          this.CanceledJobIds = new Set(ids);
+        this.CanceledJobIds = new Map(Object.entries<number>(JSON.parse(data)));
       }
     } catch (e) {
       this.logger.error(`Failed to load canceled jobs list: ${e.message}`);
@@ -106,14 +110,43 @@ export class VideoService implements OnModuleInit {
   }
 
   async transcode(job: Job<IVideoData>, codec: number = 1) {
+    this.activeJob = { job, codec };
+    try {
+      await this.checkMissedCancel();
+      return await this.runTranscode(job, codec);
+    } finally {
+      this.activeJob = undefined;
+    }
+  }
+
+  private async checkMissedCancel() {
+    if (!this.activeJob)
+      return;
+    const { job, codec } = this.activeJob;
+    try {
+      const canceledAt = Number(await this.redisPubSubService.get(`video-cancel:${codec}:${job.id}`));
+      // Queue ids can be reused, a cancel older than the job belongs to an earlier job with the same id
+      if (canceledAt >= job.timestamp)
+        this.addToCanceled({ id: job.id, canceledAt });
+    } catch (e) {
+      this.logger.error(`Failed to check job ${job.id} for a missed cancel: ${e.message}`);
+    }
+  }
+
+  private async runTranscode(job: Job<IVideoData>, codec: number) {
     // A job that failed mid segment leaves the flags set
     this.resetRetryEncoding();
     const jobIdStr = String(job.id);
-    if (this.CanceledJobIds.has(jobIdStr)) {
+    const canceledAt = this.CanceledJobIds.get(jobIdStr);
+    if (canceledAt != undefined) {
       this.CanceledJobIds.delete(jobIdStr);
       this.saveCanceledJobIds();
-      this.logger.info(`Received cancel signal from job id: ${job.id}`);
-      return {};
+      // Find the true job to cancel
+      if (job.timestamp <= canceledAt) {
+        this.logger.info(`Received cancel signal from job id: ${job.id}`);
+        return {};
+      }
+      this.logger.info(`Ignored a stale cancel signal for job id: ${job.id}`);
     }
 
     // Connect to MongoDB
@@ -140,22 +173,28 @@ export class VideoService implements OnModuleInit {
     const transcodeDir = `${this.configService.get<string>('TRANSCODE_DIR')}/${job.id}`;
     const ffmpegDir = this.configService.get<string>('FFMPEG_DIR');
     const mediainfoDir = this.configService.get<string>('MEDIAINFO_DIR');
-    const trimmedFileName = job.data.linkedStorage ? stringHelper.trimSlugFilename(job.data.filename) : job.data.filename; // Trim saved file name
-    const inputFile = `${transcodeDir}/${trimmedFileName}`;
-    const parsedInput = path.parse(inputFile);
-
     await this.ensureRcloneConfigExist(rcloneConfigFile, job.data.storage, job);
     if (job.data.linkedStorage)
       await this.ensureRcloneConfigExist(rcloneConfigFile, job.data.linkedStorage, job);
 
-    let linkedInputUrl = this.UseURLInput ? await this.getLinkedSourceUrl(job, job.data.linkedStorage || job.data.storage) : null;
+    const stillOnly = !!job.data.advancedOptions?.stillOnly;
+    // Use streams when source is not available
+    const input: StillImagesInput = stillOnly ? await this.findStillImagesInput(job) :
+      { remote: job.data.linkedStorage || job.data.storage, folder: job.data.path, file: job.data.filename, isLinked: !!job.data.linkedStorage };
+    const trimmedFileName = input.isLinked ? stringHelper.trimSlugFilename(input.file) : input.file; // Trim saved file name
+    const inputFile = `${transcodeDir}/${trimmedFileName}`;
+    const parsedInput = path.parse(inputFile);
+
+    let linkedInputUrl = this.UseURLInput ? await this.getLinkedSourceUrl(job, input) : null;
 
     // Retry if the transcoder was interrupted before
     const retryFromInterruption = await fileHelper.fileExists(transcodeDir);
     if (retryFromInterruption) {
       this.logger.notice('Transcode directory detected, maybe the transcoder was not exited properly before, cleaning up...');
-      const status = { jobId: job.id, ...job.data };
-      await this.videoResultQueue.add('retry-encoding', status);
+      if (!stillOnly) {
+        const status = { jobId: job.id, ...job.data };
+        await this.videoResultQueue.add('retry-encoding', status);
+      }
       await fileHelper.deleteFolder(transcodeDir);
     }
 
@@ -164,7 +203,7 @@ export class VideoService implements OnModuleInit {
     // Find and validate source quality if the quality is available on db
     {
       const sourceInfo = await mediaStorageModel.findOne({ _id: BigInt(job.data._id) }, { _id: 1, name: 1, quality: 1 }).lean().exec();
-      if (sourceInfo?.quality) {
+      if (!stillOnly && sourceInfo?.quality) {
         try {
           availableQualityList = await this.validateSourceQuality({
             parsedInput, quality: sourceInfo.quality, qualityList, forcedQualityList, fallbackQualityList: [Math.min(...qualityList)],
@@ -184,22 +223,22 @@ export class VideoService implements OnModuleInit {
 
     await fileHelper.createDir(transcodeDir);
     // Still need to download for audio encoding
-    if (!this.UseURLInput || codec === VideoCodec.H264) {
+    const shouldDownloadSource = stillOnly ? !linkedInputUrl : (!this.UseURLInput || codec === VideoCodec.H264);
+    if (shouldDownloadSource) {
       this.logger.info(`Downloading file from media id: ${job.data._id}`);
       try {
         const downloadedFileStats = await fileHelper.statFile(inputFile);
         if (!downloadedFileStats || downloadedFileStats.size !== job.data.size) {
           if (downloadedFileStats)
             await fileHelper.deleteFile(inputFile); // Delete file if exist
-          const downloadStorage = job.data.linkedStorage || job.data.storage;
-          await rcloneHelper.downloadFile(rcloneConfigFile, rcloneDir, downloadStorage, job.data.path, job.data.filename, transcodeDir,
-            !!job.data.linkedStorage, (args => {
+          await rcloneHelper.downloadFile(rcloneConfigFile, rcloneDir, input.remote, input.folder, input.file, transcodeDir,
+            input.isLinked, (args => {
               this.logger.info('rclone ' + args.join(' '));
             }));
-          if (job.data.linkedStorage) {
+          if (input.isLinked) {
             // Trim file name and create folder on remote
             await Promise.all([
-              fileHelper.renameFile(`${transcodeDir}/${job.data.filename}`, inputFile),
+              fileHelper.renameFile(`${transcodeDir}/${input.file}`, inputFile),
               rcloneHelper.mkdirRemote(rcloneConfigFile, rcloneDir, job.data.storage, job.data._id)
             ]);
           }
@@ -216,7 +255,7 @@ export class VideoService implements OnModuleInit {
     let videoInfo: FFProbeResult;
     let videoMIInfo: MediaInfoResult;
     try {
-      if (!this.UseURLInput) {
+      if (!linkedInputUrl && (!this.UseURLInput || stillOnly)) {
         this.logger.info(`Processing input file: ${inputFile}`);
         videoInfo = await ffmpegHelper.probeMedia(inputFile, ffmpegDir);
         videoMIInfo = await mediaInfoHelper.getMediaInfo(inputFile, mediainfoDir);
@@ -241,6 +280,9 @@ export class VideoService implements OnModuleInit {
       const statusError = await this.generateStatusError(StatusCode.NO_VIDEO_TRACK, job, { discard: true });
       throw new UnrecoverableError(statusError.errorCode);
     }
+
+    if (stillOnly)
+      return this.runStillOnly(job, { source: linkedInputUrl || inputFile, useURLInput: !!linkedInputUrl, transcodeDir, videoInfo, videoTrack });
 
     const audioTracks = videoInfo.streams.filter(s => s.codec_type === 'audio');
     if (!audioTracks.length) {
@@ -455,32 +497,15 @@ export class VideoService implements OnModuleInit {
         }
 
         if (codec === VideoCodec.H264) {
-          // Generate preview thumbnail
-          this.logger.info(`Generating preview thumbnail: ${inputFile}`);
-          this.setTranscoderPriority(1);
-          await generateSprites({
-            source: linkedInputUrl || inputFile,
-            output: `${parsedInput.dir}/${this.thumbnailFolder}`,
-            duration: videoDuration,
-            isHDR: isHDRVideo,
-            hdrSource: {
-              transfer: hdrTransfer,
-              maxCll: hdrParams?.maxCll,
-              masteringMaxLuminance: hdrParams?.masteringMaxLuminance
-            },
-            ffmpegDir,
-            useURLInput: this.UseURLInput,
-            jobId: job.id,
-            onCancel: (stop) => this.createCancelJobChecker(job.id, stop),
-            logger: this.logger
-          }, [
-            { tw: 160, th: 160, pageCols: 10, pageRows: 10, prefix: 'M', format: 'jpeg' },
-            { tw: 320, th: 320, pageCols: 5, pageRows: 5, prefix: 'L', format: 'jpeg' }
-          ]);
-          this.setTranscoderPriority(0);
+          const stillImages = await this.createThumbnails({
+            source: linkedInputUrl || inputFile, useURLInput: this.UseURLInput, outputDir: parsedInput.dir, duration: videoDuration, isHDR: isHDRVideo,
+            hdrSource: { transfer: hdrTransfer, maxCll: hdrParams?.maxCll, masteringMaxLuminance: hdrParams?.masteringMaxLuminance }, jobId: job.id
+          });
           const syncThumbnails = !!job.data.update;
           const rcloneMoveThumbArgs = this.createRcloneMoveThumbArgs(transcodeDir, job.data.storage, job.data._id, syncThumbnails);
           await this.uploadMedia(rcloneMoveThumbArgs, job.id);
+          if (stillImages)
+            await this.videoResultQueue.add('add-still-images', { ...this.generateStatus(job), stillImages });
         }
       }
 
@@ -541,14 +566,17 @@ export class VideoService implements OnModuleInit {
   addToCanceled(jobData: IJobData) {
     const jobIds = jobData.id ? [jobData.id] : (jobData.ids || []);
     const ids = Array.from(new Set(jobIds));
+    // The time comes from the API so it is on the same clock as job.timestamp
+    const canceledAt = jobData.canceledAt ?? Date.now();
     for (const id of ids) {
       const strId = String(id);
-      if (!this.CanceledJobIds.has(strId)) {
-        this.CanceledJobIds.add(strId);
-        if (this.CanceledJobIds.size > 1000) {
-          const firstItem = this.CanceledJobIds.values().next().value;
-          if (firstItem) this.CanceledJobIds.delete(firstItem);
-        }
+      // Set again so a repeated cancel moves to the end of the list
+      this.CanceledJobIds.delete(strId);
+      this.CanceledJobIds.set(strId, canceledAt);
+      if (this.CanceledJobIds.size > 1000) {
+        const firstItem = this.CanceledJobIds.keys().next().value;
+        if (firstItem)
+          this.CanceledJobIds.delete(firstItem);
       }
       this.cancelEmitter.emit(`cancel-${strId}`);
     }
@@ -558,7 +586,7 @@ export class VideoService implements OnModuleInit {
 
   private async saveCanceledJobIds() {
     try {
-      await fileHelper.writeAllText(this.canceledJobsFilePath, JSON.stringify(Array.from(this.CanceledJobIds)), 'utf-8');
+      await fileHelper.writeAllText(this.canceledJobsFilePath, JSON.stringify(Object.fromEntries(this.CanceledJobIds)), 'utf-8');
     } catch (e) {
       this.logger.error(`Failed to save canceled jobs list: ${e.message}`)
     }
@@ -1753,15 +1781,15 @@ export class VideoService implements OnModuleInit {
     }
   }
 
-  private async getLinkedSourceUrl(job: Job<IVideoData>, storageId: string) {
-    const externalStorage = await externalStorageModel.findOne({ _id: BigInt(storageId) }, { publicUrl: 1, folderId: 1 }).lean().exec();
+  private async getLinkedSourceUrl(job: Job<IVideoData>, input: StillImagesInput) {
+    const externalStorage = await externalStorageModel.findOne({ _id: BigInt(input.remote) }, { publicUrl: 1, folderId: 1 }).lean().exec();
     if (!externalStorage) {
       const statusError = await this.generateStatusError(StatusCode.STORAGE_NOT_FOUND, job);
       throw new Error(statusError.errorCode);
     }
     if (!externalStorage.publicUrl)
       return null;
-    const sourcePathItems = [externalStorage.folderId || '', job.data.path, job.data.filename];
+    const sourcePathItems = [externalStorage.folderId || '', input.folder, input.file];
     const sourcePath = path.posix.join(...sourcePathItems.map(value => encodeURIComponent(value)));
     return externalStorage.publicUrl.replace(':service_path', 's3').replace(':path', sourcePath);
   }
@@ -1887,6 +1915,8 @@ export class VideoService implements OnModuleInit {
     const status = { errorCode, jobId: job.id, ...job.data };
     const statusJson = JSON.stringify(status);
     this.logger.error(`Error: ${errorCode} - ${statusJson}`);
+    if (job.data.advancedOptions?.stillOnly)
+      return status;
     await this.kamplexApiService.ensureProducerAppIsOnline(job.data.producerUrl);
     // Callers that discard also throw UnrecoverableError, which stops BullMQ from retrying
     if (options.discard || job.attemptsMade >= job.opts.attempts)
@@ -1894,6 +1924,146 @@ export class VideoService implements OnModuleInit {
     else if (job.attemptsMade < job.opts.attempts)
       await this.videoResultQueue.add('retry-encoding', status);
     return status;
+  }
+
+  private async createThumbnails(options: CreateThumbnailsOptions) {
+    this.logger.info(`Generating preview thumbnail: ${options.source}`);
+    this.setTranscoderPriority(1);
+    try {
+      const sprites = await generateSprites({
+        source: options.source,
+        output: `${options.outputDir}/${this.thumbnailFolder}`,
+        duration: options.duration,
+        isHDR: options.isHDR,
+        hdrSource: options.hdrSource,
+        ffmpegDir: this.configService.get<string>('FFMPEG_DIR'),
+        useURLInput: options.useURLInput,
+        jobId: options.jobId,
+        keepFrames: true,
+        onCancel: (stop) => this.createCancelJobChecker(options.jobId, stop),
+        logger: this.logger
+      }, [
+        { tw: 160, th: 160, pageCols: 10, pageRows: 10, prefix: 'M', format: 'jpeg' },
+        { tw: 320, th: 320, pageCols: 5, pageRows: 5, prefix: 'L', format: 'jpeg' }
+      ]);
+      try {
+        return await this.createStillImages({
+          source: options.source, framesPath: sprites.framesPath, frameCount: sprites.frameCount, duration: options.duration,
+          outputFolder: `${options.outputDir}/${this.thumbnailFolder}/${STILL_IMAGE_PROGRESS_FOLDER}`, isHDR: options.isHDR,
+          hdrSource: options.hdrSource, ffmpegDir: this.configService.get<string>('FFMPEG_DIR'), useURLInput: options.useURLInput
+        });
+      } finally {
+        await rimraf(sprites.framesPath);
+      }
+    } finally {
+      this.setTranscoderPriority(0);
+    }
+  }
+
+  private async runStillOnly(job: Job<IVideoData>, options: RunStillOnlyOptions) {
+    const { source, useURLInput, transcodeDir, videoInfo, videoTrack } = options;
+    const ffmpegDir = this.configService.get<string>('FFMPEG_DIR');
+    const { storage, _id: sourceId, advancedOptions } = job.data;
+    try {
+      const hdrTransfer = mediaInfoHelper.getHDRTransfer(videoTrack.color_transfer);
+      const isHDR = hdrTransfer !== HDRTransfer.SDR;
+      let hdrParams: ParsedHDRMetadataResult | null = null;
+      if (isHDR) {
+        try {
+          hdrParams = await hdrMetadataHelper.getHdrMetadata(source, 0, ffmpegDir, this.logger, useURLInput);
+        } catch (e) {
+          this.logger.warning(`Failed to read HDR metadata: ${e.message}`);
+        }
+      }
+      const hdrSource = { transfer: hdrTransfer, maxCll: hdrParams?.maxCll, masteringMaxLuminance: hdrParams?.masteringMaxLuminance };
+
+      if (advancedOptions.stillOnlyTime != undefined) {
+        const main = await extractStillImage({
+          source, time: advancedOptions.stillOnlyTime, height: STILL_IMAGE_MAIN_HEIGHT, isHDR, hdrSource, ffmpegDir, useURLInput
+        });
+        const mainFile = this.createMainStillFileName(advancedOptions.stillOnlyTime);
+        await fileHelper.writeFile(`${transcodeDir}/${mainFile}`, main);
+        await this.uploadMedia(this.createRcloneMoveArgs(`${transcodeDir}/${mainFile}`, `${storage}:${sourceId}/${this.thumbnailFolder}/${STILL_IMAGE_PROGRESS_FOLDER}`), job.id);
+        await this.videoResultQueue.add('set-still-image', {
+          ...this.generateStatus(job), stillImages: { thumbs: [], mainTime: advancedOptions.stillOnlyTime, mainFile }
+        });
+        return {};
+      }
+
+      const duration = Math.trunc(+videoTrack.duration || +videoInfo.format.duration || 0);
+      const stillImages = await this.createThumbnails({ source, useURLInput, outputDir: transcodeDir, duration, isHDR, hdrSource, jobId: job.id });
+      await this.uploadMedia(this.createRcloneMoveThumbArgs(transcodeDir, storage, sourceId, true), job.id);
+      if (stillImages)
+        await this.videoResultQueue.add('add-still-images', { ...this.generateStatus(job), stillImages });
+      return {};
+    } catch (e) {
+      if (e === RejectCode.JOB_CANCEL) {
+        this.logger.info(`Received cancel signal from job id: ${job.id}`);
+        return {};
+      }
+      this.logger.error(`Still only job failed: ${e.message || JSON.stringify(e)}`);
+      throw e instanceof Error ? e : new Error(JSON.stringify(e));
+    } finally {
+      await fileHelper.deleteFolder(transcodeDir);
+    }
+  }
+
+  private async findStillImagesInput(job: Job<IVideoData>): Promise<StillImagesInput> {
+    // Find the uploaded source or the highest resolution encoded stream
+    const { storage, linkedStorage, _id: sourceId, path: folder, filename } = job.data;
+    const source = await mediaStorageModel.findOne({ _id: BigInt(sourceId) }, { streams: 1 }).lean().exec();
+    if (!source)
+      throw new UnrecoverableError(`Source ${sourceId} not found`);
+    const remote = linkedStorage || storage;
+    const files = await rcloneHelper.listRemoteJson(this.configService.get<string>('RCLONE_CONFIG_FILE'), this.configService.get<string>('RCLONE_DIR'),
+      remote, folder, { filesOnly: true }).catch((): RcloneFile[] => []);
+    if (files.some(f => f.Name === filename))
+      return { remote, folder, file: filename, isLinked: !!linkedStorage };
+    const best = (source.streams || []).filter(s => s.quality > 0).sort((a, b) => b.quality - a.quality || a.codec - b.codec)[0];
+    if (!best)
+      throw new UnrecoverableError(`Source ${sourceId} has no source file and no video stream`);
+    this.logger.info(`Source file not found, using the ${best.quality}p stream`);
+    return { remote: storage, folder: `${sourceId}/${best._id}`, file: best.name, isLinked: false };
+  }
+
+  private async createStillImages(options: CreateStillImagesOptions): Promise<StillImagesResult | null> {
+    try {
+      this.logger.info('Generating still images');
+      const faceModelFile = this.configService.get<string>('STILL_IMAGE_FACE_MODEL_FILE') || STILL_IMAGE_FACE_MODEL_FILE;
+      const faceDetector = await FaceDetector.create(faceModelFile, this.logger);
+      const picks = await pickStillImageTimes(options.framesPath, options.frameCount, options.duration, faceDetector);
+      if (!picks) {
+        this.logger.info('The video is too short for stills');
+        return null;
+      }
+      const extract = (time: number, width?: number) => extractStillImage({
+        source: options.source, time, width, height: STILL_IMAGE_MAIN_HEIGHT, isHDR: options.isHDR, hdrSource: options.hdrSource, ffmpegDir: options.ffmpegDir, useURLInput: options.useURLInput
+      });
+      await fileHelper.createDir(options.outputFolder);
+      const frames: StillImageFrame[] = [];
+      const thumbs: StillImageThumb[] = [];
+      for (let i = 0; i < picks.progress.length; i++) {
+        const still = await extract(picks.progress[i], STILL_IMAGE_PROGRESS_WIDTH);
+        const file = `${i}.avif`;
+        await fileHelper.writeFile(`${options.outputFolder}/${file}`, still);
+        const info = await sharp(still).metadata();
+        const thumbhash = await createThumbhash(still, info.width, info.height);
+        frames.push({ file, placeholder: thumbhash });
+        thumbs.push({ time: picks.progress[i], file });
+      }
+      await fileHelper.writeAllText(`${options.outputFolder}/${STILL_IMAGE_FRAMES_FILE}`, JSON.stringify(frames));
+      const mainFile = this.createMainStillFileName(picks.main);
+      await fileHelper.writeFile(`${options.outputFolder}/${mainFile}`, await extract(picks.main));
+      return { thumbs, mainTime: picks.main, mainFile };
+    } catch (e) {
+      this.logger.error(`Failed to create stills: ${e.message || e}`);
+      return null;
+    }
+  }
+
+  // The time is in the name so the CDN cannot serve an older pick
+  private createMainStillFileName(time: number) {
+    return `main-${time}.avif`;
   }
 
   private generateStatus(job: Job<IVideoData>) {

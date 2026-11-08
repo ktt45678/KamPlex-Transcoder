@@ -26,3 +26,6 @@ export const PRODUCER_DOMAINS_FILE = 'data/producer-domains.txt';
 export const SPLIT_SEGMENT_FOLDER = 'segments';
 export const CONCAT_SEGMENT_FILE = 'concat.txt';
 export const CANCELED_JOBS_FILE = 'canceled-jobs.json';
+export const STILL_IMAGE_FACE_MODEL_FILE = 'data/models/yunet.onnx';
+export const STILL_IMAGE_PROGRESS_FOLDER = 'progress';
+export const STILL_IMAGE_FRAMES_FILE = 'frames.json';

@@ -42,6 +42,8 @@ export interface IAdvancedOptions {
   queuePriority?: number;
   audioOnly?: boolean;
   videoOnly?: boolean;
+  stillOnly?: boolean;
+  stillOnlyTime?: number;
   videoCodecs?: number;
   overrideSettings?: IEncodingSetting[];
 }

@@ -1,5 +1,5 @@
-import Redis from 'ioredis';
+import { RedisClientType } from '@redis/client';
 
 export interface RedisPubSubConfig {
-  redisInstance: Redis;
+  redisInstance: RedisClientType;
 }

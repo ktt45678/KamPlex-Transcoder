@@ -1,3 +1,5 @@
+import { StillImagesResult } from './still-image.interface';
+
 export interface MediaQueueResult {
   _id: string;
 
@@ -24,6 +26,8 @@ export interface MediaQueueResult {
   replaceStreams?: string[];
 
   progress?: Partial<MediaQueueProgress>;
+
+  stillImages?: StillImagesResult;
 
   errorCode?: string;
 

@@ -3,7 +3,7 @@ import { ConfigModule, ConfigService } from '@nestjs/config';
 import { BullModule } from '@nestjs/bullmq';
 import { ScheduleModule } from '@nestjs/schedule';
 import { utilities as nestWinstonModuleUtilities, WinstonModule } from 'nest-winston';
-import { parseRedisUrl } from 'parse-redis-url-simple';
+import { createClient } from '@redis/client';
 import * as winston from 'winston';
 import 'winston-daily-rotate-file';
 
@@ -12,6 +12,7 @@ import { AppService } from './app.service';
 import { VideoModule } from './resources/video/video.module';
 import { VideoCancelModule } from './resources/video-cancel/video-cancel.module';
 import { TranscoderApiModule } from './common/modules/transcoder-api/transcoder-api.module';
+import { QueueErrorLoggerModule } from './common/modules/queue-error-logger/queue-error-logger.module';
 
 @Module({
   imports: [
@@ -21,17 +22,9 @@ import { TranscoderApiModule } from './common/modules/transcoder-api/transcoder-
     }),
     BullModule.forRootAsync({
       imports: [ConfigModule],
-      useFactory: async (configService: ConfigService) => {
-        const [parsedUrl] = parseRedisUrl(configService.get<string>('REDIS_QUEUE_URL'));
-        return {
-          connection: {
-            host: parsedUrl.host,
-            port: parsedUrl.port,
-            password: parsedUrl.password,
-            db: +parsedUrl.database
-          }
-        };
-      },
+      useFactory: async (configService: ConfigService) => ({
+        connection: createClient({ url: configService.get<string>('REDIS_QUEUE_URL') })
+      }),
       inject: [ConfigService],
     }),
     WinstonModule.forRoot({
@@ -59,6 +52,7 @@ import { TranscoderApiModule } from './common/modules/transcoder-api/transcoder-
         })
       ]
     }),
+    QueueErrorLoggerModule,
     ScheduleModule.forRoot(),
     VideoModule,
     VideoCancelModule,

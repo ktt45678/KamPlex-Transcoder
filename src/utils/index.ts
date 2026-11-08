@@ -12,6 +12,7 @@ export * from './object-helper.util';
 export * from './rclone.util';
 export * from './snowflake-id.util';
 export * from './stream-manifest.util';
+export * from './still-image.util';
 export * from './string-crypto.util';
 export * from './string-helper.util';
 export * from './thumbhash.util';
